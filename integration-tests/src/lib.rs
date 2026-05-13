@@ -1,10 +1,11 @@
 //! Cw-multi-test harness for the v1 Astroport-Juno keep-set.
 //!
 //! This crate is the composability proof + deploy-runbook-in-code for
-//! the contracts at `v0.1.1-juno-rc1`. The shared `deploy_keep_set()`
+//! the contracts at `v0.1.1-juno-rc1` (and now `v0.1.2-juno-rc2` after
+//! P2.5 lands the incentives contract). The shared `deploy_keep_set()`
 //! helper here mirrors the sequence that `planning/06-deploy-runbook.md`
-//! (to be written in P5) describes for `junod tx wasm store` / instantiate
-//! against uni-7 and juno-1.
+//! (to be written in P5) describes for `junod tx wasm store` /
+//! instantiate against uni-7 and juno-1.
 //!
 //! Per-contract integration coverage continues to live in each contract
 //! crate's `tests/` directory. The test files here under `tests/` only
@@ -14,19 +15,44 @@
 //! - `multi_hop_routing.rs` — router smoke with Juno-realistic denoms.
 //! - `paused_via_factory.rs` — pool_unpause_at plumbed through
 //!   factory.CreatePair (the wire path the cw-abc graduation flow needs).
+//! - `incentives_setup_pools.rs` — admin/controller sets alloc_points;
+//!   LP stakes; rewards accrue; ClaimRewards harvests (P2.5).
+//! - `incentives_external_native.rs` — third party funds a pool with a
+//!   non-ujuno native reward (P2.5).
+//! - `incentives_external_cw20.rs` — third party funds a pool with a cw20
+//!   reward token. AUDIT regression gate: proves the cw20-LP strip
+//!   didn't break the cw20-as-reward-token path (P2.5).
+//!
+//! **Bech32 mode** (added 2026-05-13): the app uses `MockApiBech32` with
+//! prefix `"juno"` so that `addr_validate("factory/juno1xxx/astroport/share")`
+//! correctly fails (slashes aren't valid bech32), forcing the TF LP denom
+//! to be parsed as `AssetInfo::NativeToken` rather than mis-classified as
+//! a cw20 contract address. The production chain has bech32 addresses so
+//! this matches real-world behavior.
 
 use anyhow::Result as AnyResult;
-use cosmwasm_std::{coin, Addr, Coin, Uint128};
+use cosmwasm_std::{coin, testing::MockStorage, Addr, Coin, Empty, Uint128};
 
+use astroport::asset::AssetInfo;
 use astroport::factory::{InstantiateMsg as FactoryInstantiateMsg, PairConfig, PairType};
+use astroport::incentives::{IncentivizationFeeInfo, InstantiateMsg as IncentivesInstantiateMsg};
 use astroport::native_coin_registry::{
     ExecuteMsg as RegistryExecuteMsg, InstantiateMsg as RegistryInstantiateMsg,
 };
 use astroport::router::InstantiateMsg as RouterInstantiateMsg;
-use astroport_test::cw_multi_test::{AppBuilder, ContractWrapper, Executor};
-use astroport_test::modules::stargate::{MockStargate, StargateApp as TestApp};
+use astroport_test::cw_multi_test::{
+    App, AppBuilder, BankKeeper, ContractWrapper, DistributionKeeper, Executor, FailingModule,
+    GovFailingModule, IbcFailingModule, MockAddressGenerator, MockApiBech32, StakeKeeper,
+    WasmKeeper,
+};
+use astroport_test::modules::stargate::MockStargate;
 
-/// The deployer address used by all keep-set integration tests.
+/// Bech32 prefix used by the test app's address validator. Matches the
+/// production Juno chain.
+pub const BECH32_PREFIX: &str = "juno";
+
+/// Canonical short-name for the deployer in helper calls. The actual
+/// bech32 address is derived via `app.api().addr_make(DEPLOYER)`.
 pub const DEPLOYER: &str = "deployer";
 
 /// Realistic Juno-style denoms used across all tests. The IBC paths
@@ -39,6 +65,23 @@ pub const MOCK_ATOM: &str = "ibc/ATOM";
 /// Initial bank balance per deployer-side denom. Generous enough that
 /// every test in the harness can seed pools + do follow-on flows.
 pub const INITIAL_BALANCE: u128 = 1_000_000_000_000;
+
+/// The cw-multi-test app type used by all integration tests in this
+/// crate. Differs from `astroport_test::modules::stargate::StargateApp`
+/// only in `Api`: this uses `MockApiBech32("juno")` so TF LP denoms
+/// disambiguate correctly from cw20 contract addresses.
+pub type TestApp = App<
+    BankKeeper,
+    MockApiBech32,
+    MockStorage,
+    FailingModule<Empty, Empty, Empty>,
+    WasmKeeper<Empty, Empty>,
+    StakeKeeper,
+    DistributionKeeper,
+    IbcFailingModule,
+    GovFailingModule,
+    MockStargate,
+>;
 
 /// Handles to the instantiated keep-set contracts + the code IDs needed
 /// to instantiate further pairs.
@@ -53,16 +96,23 @@ pub struct KeepSetHandles {
     pub token_code_id: u64,
 }
 
-/// Bootstrap a `MockStargate` cw-multi-test app with realistic
-/// Juno-style bank balances pre-seeded for `DEPLOYER`.
+/// Bootstrap a `MockStargate` cw-multi-test app in bech32 mode with
+/// Juno-style bank balances pre-seeded for the deployer. Uses
+/// `MockAddressGenerator` so freshly-instantiated contract addresses
+/// are bech32-valid (the default `SimpleAddressGenerator` produces
+/// `"contract0"` etc. which fail `addr_validate` in bech32 mode).
 pub fn mock_app() -> TestApp {
-    let deployer = Addr::unchecked(DEPLOYER);
+    let api = MockApiBech32::new(BECH32_PREFIX);
+    let deployer = api.addr_make(DEPLOYER);
     let coins = vec![
         coin(INITIAL_BALANCE, UJUNO),
         coin(INITIAL_BALANCE, MOCK_USDC),
         coin(INITIAL_BALANCE, MOCK_ATOM),
     ];
+    let wasm = WasmKeeper::new().with_address_generator(MockAddressGenerator);
     AppBuilder::new_custom()
+        .with_api(api)
+        .with_wasm(wasm)
         .with_stargate(MockStargate::default())
         .build(|router, _, storage| router.bank.init_balance(storage, &deployer, coins).unwrap())
 }
@@ -137,7 +187,7 @@ fn store_cw20_code(app: &mut TestApp) -> u64 {
 ///    per the v1 fee-defaults.
 /// 5. Instantiate `router` with the factory address.
 pub fn deploy_keep_set(app: &mut TestApp) -> AnyResult<KeepSetHandles> {
-    let deployer = Addr::unchecked(DEPLOYER);
+    let deployer = app.api().addr_make(DEPLOYER);
 
     let pair_code_id = store_pair_code(app);
     let factory_code_id = store_factory_code(app);
@@ -196,7 +246,11 @@ pub fn deploy_keep_set(app: &mut TestApp) -> AnyResult<KeepSetHandles> {
                 total_fee_bps: 30,
                 maker_fee_bps: 0,
                 is_disabled: false,
-                is_generator_disabled: true,
+                // is_generator_disabled = false: XYK pools are eligible
+                // to receive incentives. Flipped from upstream's default
+                // because incentives is v1 scope (P2.5). Pools still
+                // only emit when explicitly registered via SetupPools.
+                is_generator_disabled: false,
                 permissioned: false,
                 whitelist: None,
             }],
@@ -240,7 +294,7 @@ pub fn deploy_keep_set(app: &mut TestApp) -> AnyResult<KeepSetHandles> {
 /// Transfer native funds from the deployer to a fresh test wallet.
 /// Convenience wrapper around `app.send_tokens`.
 pub fn fund(app: &mut TestApp, to: &Addr, amount: Vec<Coin>) -> AnyResult<()> {
-    let deployer = Addr::unchecked(DEPLOYER);
+    let deployer = app.api().addr_make(DEPLOYER);
     app.send_tokens(deployer, to.clone(), &amount)?;
     Ok(())
 }
@@ -251,4 +305,57 @@ pub fn balance_of(app: &TestApp, who: &Addr, denom: &str) -> Uint128 {
         .query_balance(who, denom)
         .map(|c| c.amount)
         .unwrap_or_default()
+}
+
+/// Handle returned by [`deploy_incentives_addon`]. Adds the incentives
+/// contract to a keep-set that's already been deployed.
+pub struct IncentivesHandle {
+    pub incentives: Addr,
+    pub incentives_code_id: u64,
+}
+
+fn store_incentives_code(app: &mut TestApp) -> u64 {
+    app.store_code(Box::new(
+        ContractWrapper::new_with_empty(
+            astroport_incentives::execute::execute,
+            astroport_incentives::instantiate::instantiate,
+            astroport_incentives::query::query,
+        )
+        .with_reply_empty(astroport_incentives::reply::reply),
+    ))
+}
+
+/// Deploy the post-strip astroport-incentives contract against the
+/// existing keep-set. The deployer becomes the owner; `reward_token`
+/// is the internal (DAO-funded) reward emission token (typically
+/// `AssetInfo::native("ujuno")` for the production deploy).
+///
+/// `incentivization_fee_info` defaults to None (no spam fee) for ease
+/// of testing; the production deploy sets this to ~100 ujuno via
+/// UpdateConfig after instantiate.
+pub fn deploy_incentives_addon(
+    app: &mut TestApp,
+    handles: &KeepSetHandles,
+    reward_token: AssetInfo,
+    incentivization_fee_info: Option<IncentivizationFeeInfo>,
+) -> AnyResult<IncentivesHandle> {
+    let incentives_code_id = store_incentives_code(app);
+    let incentives = app.instantiate_contract(
+        incentives_code_id,
+        handles.deployer.clone(),
+        &IncentivesInstantiateMsg {
+            owner: handles.deployer.to_string(),
+            factory: handles.factory.to_string(),
+            reward_token,
+            incentivization_fee_info,
+            guardian: None,
+        },
+        &[],
+        "astroport-incentives",
+        Some(handles.deployer.to_string()),
+    )?;
+    Ok(IncentivesHandle {
+        incentives,
+        incentives_code_id,
+    })
 }

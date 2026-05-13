@@ -20,6 +20,7 @@ astroport-pair = { path = "../contracts/pair" }
 astroport-router = { path = "../contracts/router" }
 astroport-whitelist = { path = "../contracts/whitelist" }
 astroport-native-coin-registry = { path = "../contracts/periphery/native_coin_registry" }
+astroport-incentives = { path = "../contracts/tokenomics/incentives" }
 astroport-test = { path = "../packages/astroport_test", features = ["cosmwasm_1_1"] }
 
 anyhow = "1.0"

@@ -30,8 +30,8 @@ fn deploy_keep_set_create_xyk_pair_and_round_trip() {
     let handles = deploy_keep_set(&mut app).unwrap();
 
     // ---- Step 1: CreatePair, assert TF LP denom shape ----
-    let alice = Addr::unchecked(ALICE);
-    let bob = Addr::unchecked(BOB);
+    let alice = app.api().addr_make(ALICE);
+    let bob = app.api().addr_make(BOB);
 
     app.execute_contract(
         handles.deployer.clone(),
@@ -223,7 +223,7 @@ fn whitelist_post_neutron_strip_registers_under_expected_cw2_name() {
 // =====================================================================
 
 fn provide_liquidity(
-    app: &mut astroport_test::modules::stargate::StargateApp,
+    app: &mut astroport_juno_integration_tests::TestApp,
     pair: &Addr,
     sender: &Addr,
     ujuno_amount: u128,

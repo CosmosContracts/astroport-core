@@ -167,6 +167,7 @@ dependencies = [
  "anyhow",
  "astroport 5.13.1",
  "astroport-factory",
+ "astroport-incentives",
  "astroport-native-coin-registry",
  "astroport-pair",
  "astroport-router",

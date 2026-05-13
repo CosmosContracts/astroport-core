@@ -12,8 +12,8 @@ use astroport::router::{
     ExecuteMsg as RouterExecuteMsg, QueryMsg as RouterQueryMsg, SimulateSwapOperationsResponse,
     SwapOperation,
 };
+use astroport_juno_integration_tests::TestApp;
 use astroport_test::cw_multi_test::Executor;
-use astroport_test::modules::stargate::StargateApp;
 
 use astroport_juno_integration_tests::{
     balance_of, deploy_keep_set, fund, mock_app, MOCK_ATOM, MOCK_USDC, UJUNO,
@@ -32,7 +32,7 @@ fn router_two_hop_ujuno_usdc_atom() {
     let pair1 = create_pair_and_seed(&mut app, &handles, UJUNO, MOCK_USDC, POOL_SEED);
     let _pair2 = create_pair_and_seed(&mut app, &handles, MOCK_USDC, MOCK_ATOM, POOL_SEED);
 
-    let trader = Addr::unchecked(TRADER);
+    let trader = app.api().addr_make(TRADER);
     fund(&mut app, &trader, vec![coin(SWAP_INPUT, UJUNO)]).unwrap();
 
     let operations = vec![
@@ -141,7 +141,7 @@ fn router_two_hop_ujuno_usdc_atom() {
 }
 
 fn create_pair_and_seed(
-    app: &mut StargateApp,
+    app: &mut TestApp,
     handles: &astroport_juno_integration_tests::KeepSetHandles,
     denom_a: &str,
     denom_b: &str,

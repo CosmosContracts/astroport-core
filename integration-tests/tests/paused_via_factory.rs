@@ -71,7 +71,7 @@ fn pool_unpause_at_threaded_through_factory_create_pair() {
     let pair = pair_info.contract_addr.clone();
 
     // --- 1. LP-side flow stays open during the pause window. ---
-    let lp_addr = Addr::unchecked(LP);
+    let lp_addr = app.api().addr_make(LP);
     fund(
         &mut app,
         &lp_addr,
@@ -105,7 +105,7 @@ fn pool_unpause_at_threaded_through_factory_create_pair() {
         .expect("ProvideLiquidity must succeed during the pause window");
 
     // --- 2. Swap from a hypothetical sniper rejects with PoolPaused. ---
-    let sniper = Addr::unchecked(SNIPER);
+    let sniper = app.api().addr_make(SNIPER);
     fund(&mut app, &sniper, vec![coin(1_000_000, UJUNO)]).unwrap();
 
     let swap_msg = PairExecuteMsg::Swap {
