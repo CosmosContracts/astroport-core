@@ -1,9 +1,6 @@
 pub use cosmos_sdk_proto::cosmos::base::v1beta1::Coin as ProtoCoin;
 use cosmwasm_std::{Binary, Coin, CosmosMsg, CustomMsg, StdError};
 
-#[cfg(feature = "injective")]
-use cosmwasm_std::BankMsg;
-
 use prost::Message;
 
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -52,10 +49,7 @@ pub struct MsgCreateDenom {
 }
 
 impl MsgCreateDenom {
-    #[cfg(not(feature = "injective"))]
     pub const TYPE_URL: &'static str = "/osmosis.tokenfactory.v1beta1.MsgCreateDenom";
-    #[cfg(feature = "injective")]
-    pub const TYPE_URL: &'static str = "/injective.tokenfactory.v1beta1.MsgCreateDenom";
 }
 
 impl TryFrom<Binary> for MsgCreateDenom {
@@ -72,7 +66,6 @@ impl TryFrom<Binary> for MsgCreateDenom {
     }
 }
 
-#[cfg(not(feature = "injective"))]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct MsgBurn {
     #[prost(string, tag = "1")]
@@ -83,20 +76,8 @@ pub struct MsgBurn {
     pub burn_from_address: ::prost::alloc::string::String,
 }
 
-#[cfg(feature = "injective")]
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct MsgBurn {
-    #[prost(string, tag = "1")]
-    pub sender: ::prost::alloc::string::String,
-    #[prost(message, optional, tag = "2")]
-    pub amount: ::core::option::Option<cosmos_sdk_proto::cosmos::base::v1beta1::Coin>,
-}
-
 impl MsgBurn {
-    #[cfg(not(feature = "injective"))]
     pub const TYPE_URL: &'static str = "/osmosis.tokenfactory.v1beta1.MsgBurn";
-    #[cfg(feature = "injective")]
-    pub const TYPE_URL: &'static str = "/injective.tokenfactory.v1beta1.MsgBurn";
 }
 
 impl TryFrom<Binary> for MsgBurn {
@@ -113,7 +94,6 @@ impl TryFrom<Binary> for MsgBurn {
     }
 }
 
-#[cfg(not(feature = "injective"))]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct MsgMint {
     #[prost(string, tag = "1")]
@@ -124,20 +104,8 @@ pub struct MsgMint {
     pub mint_to_address: ::prost::alloc::string::String,
 }
 
-#[cfg(feature = "injective")]
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct MsgMint {
-    #[prost(string, tag = "1")]
-    pub sender: ::prost::alloc::string::String,
-    #[prost(message, optional, tag = "2")]
-    pub amount: ::core::option::Option<cosmos_sdk_proto::cosmos::base::v1beta1::Coin>,
-}
-
 impl MsgMint {
-    #[cfg(not(feature = "injective"))]
     pub const TYPE_URL: &'static str = "/osmosis.tokenfactory.v1beta1.MsgMint";
-    #[cfg(feature = "injective")]
-    pub const TYPE_URL: &'static str = "/injective.tokenfactory.v1beta1.MsgMint";
 }
 
 impl TryFrom<Binary> for MsgMint {
@@ -208,57 +176,25 @@ where
     let sender_addr: String = sender.into();
     let receiver_addr: String = receiver.into();
 
-    #[cfg(not(feature = "injective"))]
     let mint_msg = MsgMint {
-        sender: sender_addr.clone(),
+        sender: sender_addr,
         amount: Some(ProtoCoin {
             denom: coin.denom.to_string(),
             amount: coin.amount.to_string(),
         }),
-        mint_to_address: receiver_addr.clone(),
+        mint_to_address: receiver_addr,
     };
 
-    #[cfg(feature = "injective")]
-    let mint_msg = MsgMint {
-        sender: sender_addr.clone(),
-        amount: Some(ProtoCoin {
-            denom: coin.denom.to_string(),
-            amount: coin.amount.to_string(),
-        }),
-    };
-
-    #[cfg(not(feature = "injective"))]
-    return vec![CosmosMsg::Stargate {
+    vec![CosmosMsg::Stargate {
         type_url: MsgMint::TYPE_URL.to_string(),
         value: Binary::from(mint_msg.encode_to_vec()),
-    }];
-
-    #[cfg(feature = "injective")]
-    if sender_addr == receiver_addr {
-        vec![CosmosMsg::Stargate {
-            type_url: MsgMint::TYPE_URL.to_string(),
-            value: Binary::from(mint_msg.encode_to_vec()),
-        }]
-    } else {
-        vec![
-            CosmosMsg::Stargate {
-                type_url: MsgMint::TYPE_URL.to_string(),
-                value: Binary::from(mint_msg.encode_to_vec()),
-            },
-            BankMsg::Send {
-                to_address: receiver_addr,
-                amount: vec![coin],
-            }
-            .into(),
-        ]
-    }
+    }]
 }
 
 pub fn tf_burn_msg<T>(sender: impl Into<String>, coin: Coin) -> CosmosMsg<T>
 where
     T: CustomMsg,
 {
-    #[cfg(not(feature = "injective"))]
     let burn_msg = MsgBurn {
         sender: sender.into(),
         amount: Some(ProtoCoin {
@@ -266,15 +202,6 @@ where
             amount: coin.amount.to_string(),
         }),
         burn_from_address: "".to_string(),
-    };
-
-    #[cfg(feature = "injective")]
-    let burn_msg = MsgBurn {
-        sender: sender.into(),
-        amount: Some(ProtoCoin {
-            denom: coin.denom,
-            amount: coin.amount.to_string(),
-        }),
     };
 
     CosmosMsg::Stargate {

@@ -14,7 +14,6 @@ homepage = "https://astroport.fi"
 # for quicker tests, cargo test --lib
 # for more explicit tests, cargo test --features=backtraces
 backtraces = ["cosmwasm-std/backtraces"]
-injective = []
 
 [dependencies]
 cw20 = "1.1"
