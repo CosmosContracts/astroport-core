@@ -20,7 +20,7 @@ pub fn instantiate(
     _info: MessageInfo,
     msg: InstantiateMsg,
 ) -> Result<Response, ContractError> {
-    msg.astro_token.check(deps.api)?;
+    msg.reward_token.check(deps.api)?;
 
     cw2::set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
 
@@ -35,10 +35,9 @@ pub fn instantiate(
             owner: deps.api.addr_validate(&msg.owner)?,
             factory: deps.api.addr_validate(&msg.factory)?,
             generator_controller: None,
-            astro_token: msg.astro_token,
-            astro_per_second: Uint128::zero(),
+            reward_token: msg.reward_token,
+            reward_per_second: Uint128::zero(),
             total_alloc_points: Uint128::zero(),
-            vesting_contract: deps.api.addr_validate(&msg.vesting_contract)?,
             guardian: addr_opt_validate(deps.api, &msg.guardian)?,
             incentivization_fee_info: msg.incentivization_fee_info,
             token_transfer_gas_limit: None,

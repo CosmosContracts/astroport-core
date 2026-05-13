@@ -3,8 +3,7 @@ use std::collections::HashSet;
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
-    attr, ensure, from_json, Addr, DepsMut, Env, MessageInfo, Response, StdError, StdResult,
-    Uint128,
+    attr, ensure, Addr, DepsMut, Env, MessageInfo, Response, StdError, StdResult, Uint128,
 };
 use cw_utils::one_coin;
 use itertools::Itertools;
@@ -15,9 +14,7 @@ use astroport::asset::{
 use astroport::common::{claim_ownership, drop_ownership_proposal, propose_new_owner};
 use astroport::factory;
 use astroport::factory::PairType;
-use astroport::incentives::{
-    Cw20Msg, ExecuteMsg, IncentivizationFeeInfo, RewardType, TOKEN_TRANSFER_GAS_LIMIT,
-};
+use astroport::incentives::{ExecuteMsg, IncentivizationFeeInfo, TOKEN_TRANSFER_GAS_LIMIT};
 
 use crate::error::ContractError;
 use crate::state::{
@@ -73,21 +70,9 @@ pub fn execute(
 
             Ok(response)
         }
-        ExecuteMsg::Receive(cw20msg) => {
-            let maybe_lp = Asset::cw20(info.sender, cw20msg.amount);
-            let recipient = match from_json(&cw20msg.msg)? {
-                Cw20Msg::Deposit { recipient } => recipient,
-                Cw20Msg::DepositFor(recipient) => Some(recipient),
-            };
-
-            deposit(
-                deps,
-                env,
-                maybe_lp,
-                Addr::unchecked(cw20msg.sender),
-                recipient,
-            )
-        }
+        // ExecuteMsg::Receive(Cw20ReceiveMsg) handler stripped in P2.5 —
+        // Astroport-Juno only accepts TF LP tokens. See
+        // planning/11-incentives-and-gauges.md.
         ExecuteMsg::Deposit { recipient } => {
             let maybe_lp_coin = one_coin(&info)?;
             let maybe_lp = Asset::native(maybe_lp_coin.denom, maybe_lp_coin.amount);
@@ -118,8 +103,6 @@ pub fn execute(
             claim_orphaned_rewards(deps, info, limit, receiver)
         }
         ExecuteMsg::UpdateConfig {
-            astro_token,
-            vesting_contract,
             generator_controller,
             guardian,
             incentivization_fee_info,
@@ -127,8 +110,6 @@ pub fn execute(
         } => update_config(
             deps,
             info,
-            astro_token,
-            vesting_contract,
             generator_controller,
             guardian,
             incentivization_fee_info,
@@ -312,21 +293,21 @@ pub fn setup_pools(
         })
         .collect::<Result<Vec<_>, ContractError>>()?;
 
-    // Update all reward indexes and remove astro rewards from old active pools
+    // Update all reward indexes and remove internal rewards from old active pools
     for (lp_token_asset, _) in ACTIVE_POOLS.load(deps.storage)? {
         let mut pool_info = PoolInfo::load(deps.storage, &lp_token_asset)?;
         pool_info.update_rewards(deps.storage, &env, &lp_token_asset)?;
-        pool_info.disable_astro_rewards();
+        pool_info.disable_internal_rewards();
         pool_info.save(deps.storage, &lp_token_asset)?;
     }
 
     config.total_alloc_points = setup_pools.iter().map(|(_, alloc)| alloc).sum();
 
-    // Set astro rewards for new active pools
+    // Set internal rewards for new active pools
     for (active_pool, alloc_points) in &setup_pools {
         let mut pool_info = PoolInfo::may_load(deps.storage, active_pool)?.unwrap_or_default();
         pool_info.update_rewards(deps.storage, &env, active_pool)?;
-        pool_info.set_astro_rewards(&config, *alloc_points);
+        pool_info.set_internal_rewards(&config, *alloc_points);
         pool_info.save(deps.storage, active_pool)?;
     }
 
@@ -359,10 +340,10 @@ fn set_tokens_per_second(
         })
         .collect::<StdResult<Vec<_>>>()?;
 
-    config.astro_per_second = amount;
+    config.reward_per_second = amount;
 
     for (mut pool_info, lp_token, alloc_points) in pool_infos {
-        pool_info.set_astro_rewards(&config, alloc_points);
+        pool_info.set_internal_rewards(&config, alloc_points);
         pool_info.save(deps.storage, &lp_token)?;
     }
 
@@ -371,12 +352,9 @@ fn set_tokens_per_second(
     Ok(Response::new().add_attribute("action", "set_tokens_per_second"))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn update_config(
     deps: DepsMut,
     info: MessageInfo,
-    astro_token: Option<AssetInfo>,
-    vesting_contract: Option<String>,
     generator_controller: Option<String>,
     guardian: Option<String>,
     incentivization_fee_info: Option<IncentivizationFeeInfo>,
@@ -391,32 +369,10 @@ fn update_config(
 
     let mut attrs = vec![attr("action", "update_config")];
 
-    if let Some(astro_token) = astro_token {
-        astro_token.check(deps.api)?;
-        attrs.push(attr("new_astro_token", astro_token.to_string()));
-        config.astro_token = astro_token;
-
-        // Loop through all active pools and update astro asset info
-        for (lp_token, _) in ACTIVE_POOLS.load(deps.storage)? {
-            let mut pool_info = PoolInfo::load(deps.storage, &lp_token)?;
-            let protocol_reward = pool_info
-                .rewards
-                .iter_mut()
-                .find(|r| !r.reward.is_external())
-                .ok_or_else(|| {
-                    StdError::generic_err(format!(
-                        "Protocol ASTRO reward not found in active pool {lp_token}",
-                    ))
-                })?;
-            protocol_reward.reward = RewardType::Int(config.astro_token.clone());
-            pool_info.save(deps.storage, &lp_token)?;
-        }
-    }
-
-    if let Some(vesting_contract) = vesting_contract {
-        config.vesting_contract = deps.api.addr_validate(&vesting_contract)?;
-        attrs.push(attr("new_vesting_contract", vesting_contract));
-    }
+    // `astro_token` and `vesting_contract` fields removed in P2.5.
+    // The internal reward token is immutable post-instantiate (rotation
+    // requires migration), and rewards are paid directly from this
+    // contract's own bank balance (the DAO refunds via BankMsg::Send).
 
     if let Some(generator_controller) = generator_controller {
         config.generator_controller = Some(deps.api.addr_validate(&generator_controller)?);
@@ -507,9 +463,9 @@ fn update_blocked_pool_tokens(
         for token_to_block in &add {
             let asset_info_key = asset_info_key(token_to_block);
             if !BLOCKED_TOKENS.has(deps.storage, &asset_info_key) {
-                if token_to_block.eq(&config.astro_token) {
+                if token_to_block.eq(&config.reward_token) {
                     return Err(StdError::generic_err(format!(
-                        "Blocking ASTRO token {token_to_block} is prohibited",
+                        "Blocking the internal reward token {token_to_block} is prohibited",
                     ))
                     .into());
                 }
@@ -532,11 +488,11 @@ fn update_blocked_pool_tokens(
         if !to_disable.is_empty() {
             let mut reduce_total_alloc_points = Uint128::zero();
 
-            // Update all reward indexes and remove astro rewards from disabled pools
+            // Update all reward indexes and remove internal rewards from disabled pools
             for (lp_token_asset, alloc_points) in &to_disable {
                 let mut pool_info = PoolInfo::load(deps.storage, lp_token_asset)?;
                 pool_info.update_rewards(deps.storage, &env, lp_token_asset)?;
-                pool_info.disable_astro_rewards();
+                pool_info.disable_internal_rewards();
                 pool_info.save(deps.storage, lp_token_asset)?;
                 reduce_total_alloc_points += *alloc_points;
             }
@@ -562,7 +518,7 @@ fn update_blocked_pool_tokens(
             for (lp_asset, alloc_points) in &new_active_pools {
                 let mut pool_info = PoolInfo::load(deps.storage, lp_asset)?;
                 pool_info.update_rewards(deps.storage, &env, lp_asset)?;
-                pool_info.set_astro_rewards(&config, *alloc_points);
+                pool_info.set_internal_rewards(&config, *alloc_points);
                 pool_info.save(deps.storage, lp_asset)?;
             }
 

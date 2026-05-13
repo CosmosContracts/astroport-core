@@ -1,6 +1,6 @@
 use cosmwasm_std::{
     attr, ensure, wasm_execute, Addr, BankMsg, Deps, DepsMut, Env, MessageInfo, Order, ReplyOn,
-    Response, StdError, StdResult, Storage, SubMsg, Uint128,
+    Response, StdError, StdResult, Storage, Uint128,
 };
 use itertools::Itertools;
 
@@ -15,12 +15,17 @@ use astroport::asset::{
 use astroport::common::LP_SUBDENOM;
 use astroport::factory::PairType;
 use astroport::incentives::{Config, IncentivesSchedule, InputSchedule, MAX_ORPHANED_REWARD_LIMIT};
-use astroport::{factory, pair, vesting};
+use astroport::{factory, pair};
 
 /// Claim all rewards and compose [`Response`] object containing all attributes and messages.
 /// This function doesn't mutate the state but mutates in-memory objects.
 /// Function caller is responsible for updating the state.
-/// If vesting_contract is None this function reads config from state and gets vesting address.
+///
+/// Astroport-Juno change (P2.5): internal protocol rewards are paid directly
+/// from this contract's own balance (a `BankMsg::Send` for native or
+/// `cw20::Transfer` for cw20), not through a vesting contract. Upstream's
+/// `astroport-vesting` dep was stripped — the DAO refunds this contract's
+/// bank balance via `BankMsg::Send` when budget runs low.
 pub fn claim_rewards(
     storage: &dyn Storage,
     config: &Config,
@@ -79,16 +84,16 @@ pub fn claim_rewards(
         })
         .collect::<StdResult<Vec<_>>>()?;
 
-    // Claim Astroport rewards
+    // Pay protocol rewards directly from this contract's balance.
+    // Native: BankMsg::Send. cw20: cw20::ExecuteMsg::Transfer.
     if !protocol_reward_amount.is_zero() {
-        messages.push(SubMsg::new(wasm_execute(
-            &config.vesting_contract,
-            &vesting::ExecuteMsg::Claim {
-                recipient: Some(user.to_string()),
-                amount: Some(protocol_reward_amount),
-            },
-            vec![],
-        )?));
+        let reward_asset = config.reward_token.with_balance(protocol_reward_amount);
+        let transfer = reward_asset.into_submsg(
+            user,
+            Some((ReplyOn::Error, POST_TRANSFER_REPLY_ID)),
+            config.token_transfer_gas_limit,
+        )?;
+        messages.push(transfer);
     }
 
     Ok(Response::new()
@@ -123,7 +128,7 @@ pub fn deactivate_pool(
             let (_, alloc_points) = active_pools.swap_remove(ind);
 
             pool_info.update_rewards(deps.storage, &env, &lp_token_asset)?;
-            pool_info.disable_astro_rewards();
+            pool_info.disable_internal_rewards();
             pool_info.save(deps.storage, &lp_token_asset)?;
 
             config.total_alloc_points = config.total_alloc_points.checked_sub(alloc_points)?;
@@ -131,7 +136,7 @@ pub fn deactivate_pool(
             for (lp_asset, alloc_points) in &active_pools {
                 let mut pool_info = PoolInfo::load(deps.storage, lp_asset)?;
                 pool_info.update_rewards(deps.storage, &env, lp_asset)?;
-                pool_info.set_astro_rewards(&config, *alloc_points);
+                pool_info.set_internal_rewards(&config, *alloc_points);
                 pool_info.save(deps.storage, lp_asset)?;
             }
 
@@ -167,7 +172,7 @@ pub fn deactivate_blocked_pools(deps: DepsMut, env: Env) -> Result<Response, Con
         // check if pair type is blocked
         if blocked_pair_types.contains(&pair_info.pair_type) {
             pool_info.update_rewards(deps.storage, &env, lp_token_asset)?;
-            pool_info.disable_astro_rewards();
+            pool_info.disable_internal_rewards();
             pool_info.save(deps.storage, lp_token_asset)?;
 
             config.total_alloc_points = config.total_alloc_points.checked_sub(*alloc_points)?;
@@ -187,7 +192,7 @@ pub fn deactivate_blocked_pools(deps: DepsMut, env: Env) -> Result<Response, Con
         for (lp_asset, alloc_points) in &active_pools {
             let mut pool_info = PoolInfo::load(deps.storage, lp_asset)?;
             pool_info.update_rewards(deps.storage, &env, lp_asset)?;
-            pool_info.set_astro_rewards(&config, *alloc_points);
+            pool_info.set_internal_rewards(&config, *alloc_points);
             pool_info.save(deps.storage, lp_asset)?;
         }
 
@@ -236,7 +241,7 @@ pub fn incentivize(
         deps.storage,
         &lp_token_asset,
         &schedule,
-        &config.astro_token,
+        &config.reward_token,
     )?;
 
     // Check whether this is a new external reward token.
@@ -244,7 +249,7 @@ pub fn incentivize(
     // Otherwise, reward token will be removed from the pool info and go to outstanding rewards.
     // Next schedules with the same token will be considered as "new".
     // ASTRO rewards don't require incentivize fee.
-    if rewards_number_before < pool_info.rewards.len() && schedule.reward_info != config.astro_token
+    if rewards_number_before < pool_info.rewards.len() && schedule.reward_info != config.reward_token
     {
         // If fee set we expect to receive it
         if let Some(incentivization_fee_info) = &config.incentivization_fee_info {

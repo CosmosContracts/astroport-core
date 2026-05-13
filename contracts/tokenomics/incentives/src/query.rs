@@ -62,8 +62,8 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> Result<Binary, ContractErro
             let reward_asset = determine_asset_info(&reward, deps.api)?;
             let config = CONFIG.load(deps.storage)?;
 
-            let is_fee_expected = if reward_asset == config.astro_token {
-                // ASTRO rewards don't require incentivize fee.
+            let is_fee_expected = if reward_asset == config.reward_token {
+                // Internal (DAO-funded) rewards don't require an incentivize fee.
                 false
             } else {
                 let lp_asset = determine_asset_info(&lp_token, deps.api)?;

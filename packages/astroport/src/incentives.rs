@@ -3,7 +3,6 @@ use std::ops::RangeInclusive;
 
 use cosmwasm_schema::{cw_serde, QueryResponses};
 use cosmwasm_std::{Addr, Coin, Decimal256, Env, StdError, StdResult, Uint128};
-use cw20::Cw20ReceiveMsg;
 
 use crate::asset::{Asset, AssetInfo};
 
@@ -34,8 +33,10 @@ pub const MAX_ORPHANED_REWARD_LIMIT: u8 = 10;
 pub struct InstantiateMsg {
     pub owner: String,
     pub factory: String,
-    pub astro_token: AssetInfo,
-    pub vesting_contract: String,
+    /// The internal "main emission" reward token. Renamed from upstream's
+    /// `astro_token`; Juno's deployment defaults this to native ujuno but
+    /// any AssetInfo is allowed at instantiate time.
+    pub reward_token: AssetInfo,
     pub incentivization_fee_info: Option<IncentivizationFeeInfo>,
     pub guardian: Option<String>,
 }
@@ -107,10 +108,13 @@ pub enum ExecuteMsg {
         /// The LP token cw20 address or token factory denom
         lp_tokens: Vec<String>,
     },
-    /// Receives a message of type [`Cw20ReceiveMsg`]. Handles cw20 LP token deposits.
-    Receive(Cw20ReceiveMsg),
     /// Stake LP tokens in the Generator. LP tokens staked on behalf of recipient if recipient is set.
     /// Otherwise LP tokens are staked on behalf of message sender.
+    ///
+    /// Astroport-Juno only accepts token-factory LP tokens (the pair contract
+    /// emits only TF LPs in this fork); the legacy cw20-LP entry point
+    /// (`ExecuteMsg::Receive` + `Cw20Msg::{Deposit, DepositFor}`) was stripped
+    /// in P2.5. See planning/11-incentives-and-gauges.md.
     Deposit { recipient: Option<String> },
     /// Withdraw LP tokens from the Generator
     Withdraw {
@@ -119,10 +123,10 @@ pub enum ExecuteMsg {
         /// The amount to withdraw. Must not exceed total staked amount.
         amount: Uint128,
     },
-    /// Set a new amount of ASTRO to distribute per seconds.
+    /// Set a new amount of the internal reward token to distribute per second.
     /// Only the owner can execute this.
     SetTokensPerSecond {
-        /// The new amount of ASTRO to distribute per second
+        /// The new amount of the internal reward token to distribute per second
         amount: Uint128,
     },
     /// Incentivize a pool with external rewards. Rewards can be in either native or cw20 form.
@@ -165,12 +169,16 @@ pub enum ExecuteMsg {
     },
     /// Update config.
     /// Only the owner can execute it.
+    ///
+    /// Astroport-Juno stripped `astro_token` and `vesting_contract` from the
+    /// upstream UpdateConfig payload — the internal reward token is now
+    /// immutable post-instantiate (a rotation requires migration) and
+    /// rewards are paid directly from the incentives contract's own bank
+    /// balance (the DAO refunds via BankMsg::Send).
     UpdateConfig {
-        /// The new ASTRO token info
-        astro_token: Option<AssetInfo>,
-        /// The new vesting contract address
-        vesting_contract: Option<String>,
-        /// The new generator controller contract address
+        /// The new generator controller contract address. Only the
+        /// controller (in addition to owner) can call SetupPools; this is
+        /// the binding to the DAO DAO gauge adapter.
         generator_controller: Option<String>,
         /// The new generator guardian
         guardian: Option<String>,
@@ -181,8 +189,8 @@ pub enum ExecuteMsg {
     },
     /// Add or remove token to the block list.
     /// Only owner or guardian can execute this.
-    /// Pools which contain these tokens can't be incentivized with ASTRO rewards.
-    /// Also blocked tokens can't be used as external reward.
+    /// Pools which contain these tokens can't be incentivized with internal
+    /// rewards. Blocked tokens also can't be used as external rewards.
     /// Current active pools with these tokens will be removed from active set.
     UpdateBlockedTokenslist {
         /// Tokens to add
@@ -213,15 +221,8 @@ pub enum ExecuteMsg {
     ClaimOwnership {},
 }
 
-#[cw_serde]
-/// Cw20 hook message template
-pub enum Cw20Msg {
-    Deposit {
-        recipient: Option<String>,
-    },
-    /// Besides this enum variant is redundant we keep this for backward compatibility with old pair contracts
-    DepositFor(String),
-}
+// Cw20Msg (was used for cw20-LP `Receive` hook variants Deposit / DepositFor)
+// removed in P2.5 — Astroport-Juno only accepts TF LP tokens.
 
 #[cw_serde]
 #[derive(QueryResponses)]
@@ -277,7 +278,7 @@ pub enum QueryMsg {
         limit: Option<u8>,
     },
     #[returns(Vec<(String, Uint128)>)]
-    /// Returns the list of all pools receiving astro emissions
+    /// Returns the list of all pools receiving internal emissions
     ActivePools {},
 }
 
@@ -297,14 +298,15 @@ pub struct Config {
     pub factory: Addr,
     /// Contract address which can only set active generators and their alloc points
     pub generator_controller: Option<Addr>,
-    /// [`AssetInfo`] of the ASTRO token
-    pub astro_token: AssetInfo,
-    /// Total amount of ASTRO rewards per second
-    pub astro_per_second: Uint128,
+    /// [`AssetInfo`] of the internal (DAO-funded) reward token. Renamed from
+    /// upstream's `astro_token`; for Astroport-Juno this is typically
+    /// `AssetInfo::native("ujuno")`. Immutable post-instantiate.
+    pub reward_token: AssetInfo,
+    /// Total amount of the internal reward token to distribute per second.
+    /// Renamed from upstream's `astro_per_second`.
+    pub reward_per_second: Uint128,
     /// Total allocation points. Must be the sum of all allocation points in all active generators
     pub total_alloc_points: Uint128,
-    /// The vesting contract which distributes internal (ASTRO) rewards
-    pub vesting_contract: Addr,
     /// The guardian address which can add or remove tokens from blacklist
     pub guardian: Option<Addr>,
     /// Defines native fee along with fee receiver.
@@ -322,7 +324,11 @@ pub struct Config {
 /// This enum is a tiny wrapper over [`AssetInfo`] to differentiate between internal and external rewards.
 /// External rewards always have a next_update_ts field which is used to update reward per second (or disable them).
 pub enum RewardType {
-    /// Internal rewards aka ASTRO emissions don't have next_update_ts field and they are paid out from Vesting contract.
+    /// Internal rewards (the DAO-funded "main emission" reward token; was
+    /// ASTRO upstream) don't have a next_update_ts field. Astroport-Juno
+    /// pays these directly from the incentives contract's own bank balance
+    /// (the DAO refunds via BankMsg::Send) — upstream's vesting-contract
+    /// dependency was stripped in P2.5.
     Int(AssetInfo),
     /// External rewards always have corresponding schedules. Reward is paid out from Incentives contract balance.
     Ext {
@@ -332,6 +338,8 @@ pub enum RewardType {
     },
 }
 
+// RewardType::Int means "the internal DAO-funded reward token"
+// (was named "ASTRO" upstream).
 impl RewardType {
     pub fn is_external(&self) -> bool {
         matches!(&self, RewardType::Ext { .. })

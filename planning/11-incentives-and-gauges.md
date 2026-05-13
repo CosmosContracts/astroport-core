@@ -52,7 +52,11 @@ Three layers, two already exist:
 │  PAYOUT  (re-introduce — astroport-incentives, stripped)        │
 │    holds DAO-funded ujuno emission budget                       │
 │    emits per-second based on SetupPools alloc_points            │
-│    LPs accrue PASSIVELY via tokenfactory_tracker (no deposit)   │
+│    LPs explicitly Deposit { recipient } their TF LP denom into  │
+│      incentives → start accruing; Withdraw { lp_token, amount } │
+│      to unstake. UserInfo.amount tracked per (user, lp_token).  │
+│      Standard yield-farm pattern; same UX as upstream Astroport │
+│      on Neutron.                                                │
 │    EXTERNAL: anyone can Incentivize { lp_token, schedule } with │
 │              any reward token (native or cw20)                  │
 └─────────────────────────────────────────────────────────────────┘
@@ -134,18 +138,32 @@ contract is 7 source files + tests + assets. Net size after strip
   bank balance; the DAO refunds via `BankMsg::Send` when budget is low.
   Removes one entire contract dep + one external query path. **This is
   the biggest single simplification.**
-- **cw20-LP staking flow only** — `ExecuteMsg::Receive(Cw20ReceiveMsg)` +
-  the `Cw20Msg::{Deposit, DepositFor}` hook variants + explicit
-  `ExecuteMsg::Deposit { recipient }` + `ExecuteMsg::Withdraw { lp_token, amount }`.
-  Astroport-Juno LP tokens are TF-only (P0 stance), so the LP-side cw20
-  path is dead. Removing it cuts the per-user deposit/withdraw state-machine
-  surface and ~20% of `src/execute.rs`.
-  - **cw20 dep STAYS** in `Cargo.toml` — it's load-bearing for the
-    reward-token path (see below). Removing the cw20 LP flow does not
+- **cw20-LP staking entry point only** — `ExecuteMsg::Receive(Cw20ReceiveMsg)` +
+  the `Cw20Msg::{Deposit, DepositFor}` hook variants. **That's the entire
+  strip.** The `Receive` handler is the only cw20-LP-specific code path:
+  it converts an inbound `cw20::Send(amount, msg=Cw20Msg::Deposit)` into
+  an internal `deposit(...)` call. With cw20-LP gone, only the TF-LP
+  path (`ExecuteMsg::Deposit { recipient }`) feeds `deposit(...)`.
+  Strip surface: ~30 LoC in `execute.rs` + the `Cw20Msg` type in
+  `packages/astroport/src/incentives.rs`.
+  - **What we KEEP that I previously planned to strip** (corrected
+    after reading upstream `state.rs` + `execute.rs`):
+    - `ExecuteMsg::Deposit { recipient }` — the TF-LP stake path.
+      Caller sends a single TF LP coin via `info.funds`; contract
+      registers it in `UserInfo`.
+    - `ExecuteMsg::Withdraw { lp_token, amount }` — TF-LP unstake.
+    - `UserInfo` storage + `deposit()` / `withdraw()` internal helpers.
+      The yield-farm accounting machinery is needed for the TF-LP
+      path, not just the cw20 path.
+    - LPs must explicitly stake (standard yield-farm UX; same as
+      upstream Astroport on Neutron). No passive accrual — that was
+      a misreading of the contract's design on my part.
+  - **cw20 dep STAYS** in `Cargo.toml` — load-bearing for the
+    reward-token path (see below). Removing the cw20-LP flow does not
     let us drop the runtime dep.
-  - **What we keep on the cw20 side** (Juno has real cw20 tokens in
-    circulation — RAW, NETA, MARBLE, legacy projects — and projects
-    must be able to incentivize pools with their own cw20):
+  - **What we keep on the cw20-as-REWARD side** (Juno has real cw20
+    tokens in circulation — RAW, NETA, MARBLE, legacy projects — and
+    projects must be able to incentivize pools with their own cw20):
     - `Incentivize { lp_token, schedule }` accepts `schedule.reward.info: AssetInfo::Token { contract_addr }`.
       Funder pre-grants allowance via `cw20::IncreaseAllowance`, then
       calls `Incentivize`; the contract pulls via `cw20::TransferFrom`.
@@ -171,14 +189,14 @@ contract is 7 source files + tests + assets. Net size after strip
   default.** Upstream default fee was ASTRO; ours defaults to
   `Some({ fee_receiver: DAO core, fee: 1 ujuno })` — DAO-configurable.
 
-### Strip surface estimate
+### Strip surface estimate (revised after reading upstream)
 
-- Delete entirely: `ExecuteMsg::Receive(Cw20ReceiveMsg)` +
-  `Cw20Msg::{Deposit, DepositFor}` + `ExecuteMsg::Deposit` +
-  `ExecuteMsg::Withdraw` + per-user-deposit `UserInfo` state machine
-  for the cw20-LP path + `vesting_contract` plumbing + all
-  `astro_token`-named references. **cw20 dep stays** (rewards).
-  ~350 LoC delete.
+- Delete entirely: `ExecuteMsg::Receive(Cw20ReceiveMsg)` arm in
+  `execute.rs` + `Cw20Msg` type in `packages/astroport/src/incentives.rs`
+  + `vesting_contract` plumbing + all `astro_token`-named references
+  (rename to `reward_token`). **cw20 dep stays** (rewards). **TF-LP
+  Deposit/Withdraw stays** (the actual stake path).
+  ~80 LoC delete.
 - Rename + simplify: `UpdateConfig`, `IncentivizationFeeInfo`,
   `InstantiateMsg`. ~50 LoC touch.
 - Generalize reward_token (was hardcoded ASTRO in many places).
@@ -191,8 +209,11 @@ contract is 7 source files + tests + assets. Net size after strip
   keep-set (no pair_stable, no vesting), preserving cw20-reward-token
   test coverage. ~200 LoC rewrite.
 
-Net contract source change: ~430 LoC delete + ~80 LoC touch + ~200
-LoC test rewrite. Slightly smaller than the strip we did in P0.
+Net contract source change: ~160 LoC delete + ~80 LoC touch + ~200
+LoC test rewrite. Significantly smaller than originally planned —
+the upstream contract's deposit-based model is the right shape for
+Juno; we're only shaving the cw20-LP entry point and the ASTRO-token
+specifics.
 
 ## Astroport incentives — additions
 

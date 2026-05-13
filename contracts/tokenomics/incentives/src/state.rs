@@ -20,7 +20,7 @@ pub const CONFIG: Item<Config> = Item::new("config");
 
 /// Contains a proposal to change contract ownership.
 pub const OWNERSHIP_PROPOSAL: Item<OwnershipProposal> = Item::new("ownership_proposal");
-/// Pools which receive ASTRO emissions
+/// Pools which receive internal (DAO-funded) emissions
 pub const ACTIVE_POOLS: Item<Vec<(AssetInfo, Uint128)>> = Item::new("active_pools");
 /// Prohibited tokens set. Key: binary representing [`AssetInfo`] converted with [`crate::utils::asset_info_key`].
 pub const BLOCKED_TOKENS: Map<&[u8], ()> = Map::new("blocked_tokens");
@@ -207,18 +207,20 @@ impl PoolInfo {
             .collect()
     }
 
-    /// Set astro per second for this pool according to alloc points and general astro per second value
-    pub fn set_astro_rewards(&mut self, config: &Config, alloc_points: Uint128) {
-        if let Some(astro_reward_info) = self.rewards.iter_mut().find(|r| !r.reward.is_external()) {
-            astro_reward_info.rps = Decimal256::from_ratio(
-                config.astro_per_second * alloc_points,
+    /// Set internal reward per second for this pool according to alloc
+    /// points and the global `reward_per_second` value. The "internal" reward
+    /// is the DAO-funded main-emission token (was ASTRO upstream).
+    pub fn set_internal_rewards(&mut self, config: &Config, alloc_points: Uint128) {
+        if let Some(reward_info) = self.rewards.iter_mut().find(|r| !r.reward.is_external()) {
+            reward_info.rps = Decimal256::from_ratio(
+                config.reward_per_second * alloc_points,
                 config.total_alloc_points,
             );
         } else {
             self.rewards.push(RewardInfo {
-                reward: RewardType::Int(config.astro_token.clone()),
+                reward: RewardType::Int(config.reward_token.clone()),
                 rps: Decimal256::from_ratio(
-                    config.astro_per_second * alloc_points,
+                    config.reward_per_second * alloc_points,
                     config.total_alloc_points,
                 ),
                 index: Default::default(),
@@ -227,19 +229,20 @@ impl PoolInfo {
         }
     }
 
-    /// Check whether this pools receiving ASTRO emissions
+    /// Check whether this pool is receiving internal emissions
     pub fn is_active_pool(&self) -> bool {
         self.rewards
             .iter()
             .any(|r| !r.reward.is_external() && !r.rps.is_zero())
     }
 
-    /// This function disables ASTRO rewards in a specific pool.
-    /// We must keep ASTRO schedule even tho reward per second becomes zero
-    /// because users still should be able to claim outstanding rewards according to indexes.
-    pub fn disable_astro_rewards(&mut self) {
-        if let Some(astro_reward_info) = self.rewards.iter_mut().find(|r| !r.reward.is_external()) {
-            astro_reward_info.rps = Decimal256::zero();
+    /// Disable internal rewards in a specific pool.
+    /// We must keep the schedule entry even though reward per second becomes
+    /// zero, because users still should be able to claim outstanding rewards
+    /// according to indexes.
+    pub fn disable_internal_rewards(&mut self) {
+        if let Some(reward_info) = self.rewards.iter_mut().find(|r| !r.reward.is_external()) {
+            reward_info.rps = Decimal256::zero();
         }
     }
 
@@ -266,7 +269,7 @@ impl PoolInfo {
         storage: &mut dyn Storage,
         lp_asset: &AssetInfo,
         schedule: &IncentivesSchedule,
-        astro_token: &AssetInfo,
+        reward_token: &AssetInfo,
     ) -> Result<(), ContractError> {
         let ext_rewards_len = self
             .rewards
@@ -282,7 +285,7 @@ impl PoolInfo {
         // Allowing ASTRO reward to exceed this limit
         if ext_rewards_len == MAX_REWARD_TOKENS as usize
             && maybe_active_schedule.is_none()
-            && schedule.reward_info.ne(astro_token)
+            && schedule.reward_info.ne(reward_token)
         {
             return Err(ContractError::TooManyRewardTokens {
                 lp_token: lp_asset.to_string(),

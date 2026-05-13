@@ -140,6 +140,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "astroport-incentives"
+version = "1.4.0-juno"
+dependencies = [
+ "anyhow",
+ "astroport 5.13.1",
+ "astroport-factory",
+ "astroport-native-coin-registry",
+ "astroport-pair",
+ "astroport-test",
+ "cosmwasm-schema",
+ "cosmwasm-std",
+ "cw-storage-plus 1.2.0",
+ "cw-utils 1.0.3",
+ "cw2 1.1.2",
+ "cw20 1.1.2",
+ "cw20-base",
+ "itertools 0.12.1",
+ "thiserror",
+]
+
+[[package]]
 name = "astroport-juno-integration-tests"
 version = "0.1.0"
 dependencies = [

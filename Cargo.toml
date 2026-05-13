@@ -12,21 +12,15 @@ members = [
     "contracts/periphery/native_coin_registry",
     "contracts/periphery/oracle",
     "contracts/periphery/tokenfactory_tracker",
+    "contracts/tokenomics/incentives",
     "integration-tests",
 ]
 # pair_stable, pair_concentrated, and astroport_pcl_common retained in-tree
 # but excluded from the workspace; v1.1 / v1.2 re-add targets. See
 # planning/01-strip-list.md.
-#
-# tokenomics/incentives is restored verbatim from upstream v5.13.1 here for
-# audit-diff readability. The Juno modifications (strip cw20-LP path, strip
-# vesting, generalize reward_token, add UpdateBudget) land in the next
-# commits and re-add it to [members]. Excluded until that's done so the
-# workspace continues to build. See planning/11-incentives-and-gauges.md.
 exclude = [
     "contracts/pair_stable",
     "contracts/pair_concentrated",
-    "contracts/tokenomics/incentives",
     "packages/astroport_pcl_common",
 ]
 
