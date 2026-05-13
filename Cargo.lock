@@ -140,6 +140,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "astroport-juno-integration-tests"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "astroport 5.13.1",
+ "astroport-factory",
+ "astroport-native-coin-registry",
+ "astroport-pair",
+ "astroport-router",
+ "astroport-test",
+ "astroport-whitelist",
+ "cosmwasm-schema",
+ "cosmwasm-std",
+ "cw1-whitelist",
+ "cw20 1.1.2",
+ "cw20-base",
+]
+
+[[package]]
 name = "astroport-juno-types"
 version = "0.1.0"
 dependencies = [

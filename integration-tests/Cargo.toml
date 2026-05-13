@@ -1,0 +1,27 @@
+[package]
+name = "astroport-juno-integration-tests"
+version = "0.1.0"
+edition = "2021"
+description = "Composability proof + deploy-runbook-in-code for the Astroport-Juno v1 keep-set (factory, pair, router, whitelist, native_coin_registry). Not shipped — cw-multi-test only."
+license = "GPL-3.0-only"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+cosmwasm-std.workspace = true
+cosmwasm-schema.workspace = true
+cw20 = "1.1"
+
+astroport = { path = "../packages/astroport" }
+astroport-factory = { path = "../contracts/factory" }
+astroport-pair = { path = "../contracts/pair" }
+astroport-router = { path = "../contracts/router" }
+astroport-whitelist = { path = "../contracts/whitelist" }
+astroport-native-coin-registry = { path = "../contracts/periphery/native_coin_registry" }
+astroport-test = { path = "../packages/astroport_test", features = ["cosmwasm_1_1"] }
+
+anyhow = "1.0"
+cw20-base = "1.1"
+cw1-whitelist = { version = "1.1", features = ["library"] }
