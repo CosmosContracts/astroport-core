@@ -1,5 +1,5 @@
 use astroport::{asset::MINIMUM_LIQUIDITY_AMOUNT, pair::MAX_FEE_SHARE_BPS};
-use cosmwasm_std::{ConversionOverflowError, OverflowError, StdError, Uint128};
+use cosmwasm_std::{ConversionOverflowError, OverflowError, StdError, Timestamp, Uint128};
 use cw_utils::{ParseReplyError, PaymentError};
 use thiserror::Error;
 
@@ -78,6 +78,9 @@ pub enum ContractError {
         MAX_FEE_SHARE_BPS
     )]
     FeeShareOutOfBounds {},
+
+    #[error("Pool is paused until {unpause_at}")]
+    PoolPaused { unpause_at: Timestamp },
 }
 
 impl From<OverflowError> for ContractError {
