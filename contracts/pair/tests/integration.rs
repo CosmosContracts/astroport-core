@@ -2353,11 +2353,7 @@ fn test_create_xyk_custom_type() {
 /// Instantiate a pair whose swap gate stays closed until `unpause_at`.
 /// Mirrors `instantiate_pair` but threads `pool_unpause_at` through
 /// XYKPoolParams.
-fn instantiate_paused_pair(
-    mut router: &mut TestApp,
-    owner: &Addr,
-    unpause_at: Timestamp,
-) -> Addr {
+fn instantiate_paused_pair(mut router: &mut TestApp, owner: &Addr, unpause_at: Timestamp) -> Addr {
     let token_contract_code_id = store_token_code(&mut router);
     let pair_contract_code_id = store_pair_code(&mut router);
     let factory_code_id = store_factory_code(&mut router);
@@ -2506,10 +2502,7 @@ fn provide_and_withdraw_during_pause_succeeds() {
     app.send_tokens(
         owner.clone(),
         alice.clone(),
-        &[
-            coin(50_000_000_000, "uusd"),
-            coin(50_000_000_000, "uluna"),
-        ],
+        &[coin(50_000_000_000, "uusd"), coin(50_000_000_000, "uluna")],
     )
     .unwrap();
 
