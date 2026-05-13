@@ -1,17 +1,15 @@
 #![cfg(not(tarpaulin_include))]
 
-use cosmwasm_std::{coins, from_json, to_json_binary, Addr, Decimal, Empty, StdError, Uint128};
+use cosmwasm_std::{coins, from_json, to_json_binary, Addr, Empty, StdError, Uint128};
 use cw20::{BalanceResponse, Cw20ExecuteMsg, Cw20QueryMsg};
 
 use astroport::asset::{native_asset_info, token_asset_info, AssetInfo};
 use astroport::factory::PairType;
-use astroport::pair_concentrated::ConcentratedPoolParams;
 use astroport::router::{
     ExecuteMsg, InstantiateMsg, QueryMsg, SimulateSwapOperationsResponse, SwapOperation,
     SwapResponseData,
 };
 use astroport_router::error::ContractError;
-use astroport_test::convert::f64_to_dec;
 use astroport_test::cw_multi_test::{AppBuilder, Contract, ContractWrapper, Executor};
 use astroport_test::modules::stargate::{MockStargate, StargateApp as App};
 
@@ -49,7 +47,7 @@ fn router_does_not_enforce_spread_assertion() {
 
     for (a, b, typ, liq) in [
         (&token_x, &token_y, PairType::Xyk {}, 100_000_000000),
-        (&token_y, &token_z, PairType::Stable {}, 1_000_000_000000),
+        (&token_y, &token_z, PairType::Xyk {}, 1_000_000_000000),
     ] {
         let pair = helper
             .create_pair(
@@ -156,7 +154,7 @@ fn route_through_pairs_with_natives() {
 
     for (a, b, typ, liq) in [
         (&denom_x, &denom_y, PairType::Xyk {}, 100_000_000000),
-        (&denom_y, &denom_z, PairType::Stable {}, 1_000_000_000000),
+        (&denom_y, &denom_z, PairType::Xyk {}, 1_000_000_000000),
     ] {
         let pair = helper
             .create_pair(
@@ -911,29 +909,12 @@ fn test_reverse_simulation() {
             .create_pair(
                 &mut app,
                 &owner,
-                PairType::Custom("concentrated".to_string()),
+                PairType::Xyk {},
                 [
                     native_asset_info(a.to_string()),
                     native_asset_info(b.to_string()),
                 ],
-                Some(
-                    to_json_binary(&ConcentratedPoolParams {
-                        amp: f64_to_dec(10f64),
-                        gamma: f64_to_dec(0.000145),
-                        mid_fee: f64_to_dec(0.0026),
-                        out_fee: f64_to_dec(0.0045),
-                        fee_gamma: f64_to_dec(0.00023),
-                        repeg_profit_threshold: f64_to_dec(0.000002),
-                        min_price_scale_delta: f64_to_dec(0.000146),
-                        price_scale: Decimal::from_ratio(2u8, 1u8),
-                        ma_half_time: 600,
-                        track_asset_balances: None,
-                        fee_share: None,
-                        allowed_xcp_profit_drop: None,
-                        xcp_profit_losses_threshold: None,
-                    })
-                    .unwrap(),
-                ),
+                None,
             )
             .unwrap();
         mint_native(&mut app, a, liq, &pair).unwrap();

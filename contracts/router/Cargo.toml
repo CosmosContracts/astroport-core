@@ -36,7 +36,6 @@ cosmwasm-schema.workspace = true
 
 [dev-dependencies]
 astroport-factory = { path = "../factory" }
-astroport-pair-concentrated = { path = "../pair_concentrated", version = "4.1" }
 astroport-native-coin-registry = { path = "../periphery/native_coin_registry", version = "1.1" }
 cw20-base = "1.1"
 astroport-pair = { path = "../pair" }

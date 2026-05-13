@@ -37,16 +37,6 @@ impl FactoryHelper {
 
         let pair_code_id = router.store_code(pair_contract);
 
-        let pcl_contract = Box::new(
-            ContractWrapper::new_with_empty(
-                astroport_pair_concentrated::contract::execute,
-                astroport_pair_concentrated::contract::instantiate,
-                astroport_pair_concentrated::queries::query,
-            )
-            .with_reply_empty(astroport_pair_concentrated::contract::reply),
-        );
-        let pcl_code_id = router.store_code(pcl_contract);
-
         let coin_registry_contract = Box::new(ContractWrapper::new_with_empty(
             astroport_native_coin_registry::contract::execute,
             astroport_native_coin_registry::contract::instantiate,
@@ -79,38 +69,16 @@ impl FactoryHelper {
         let factory_code_id = router.store_code(factory_contract);
 
         let msg = astroport::factory::InstantiateMsg {
-            pair_configs: vec![
-                PairConfig {
-                    code_id: pair_code_id,
-                    pair_type: PairType::Xyk {},
-                    total_fee_bps: 0,
-                    maker_fee_bps: 0,
-                    is_disabled: false,
-                    is_generator_disabled: false,
-                    permissioned: false,
-                    whitelist: None,
-                },
-                PairConfig {
-                    code_id: pair_code_id,
-                    pair_type: PairType::Stable {},
-                    total_fee_bps: 0,
-                    maker_fee_bps: 0,
-                    is_disabled: false,
-                    is_generator_disabled: false,
-                    permissioned: false,
-                    whitelist: None,
-                },
-                PairConfig {
-                    code_id: pcl_code_id,
-                    maker_fee_bps: 5000,
-                    total_fee_bps: 0u16, // Concentrated pair does not use this field,
-                    pair_type: PairType::Custom("concentrated".to_string()),
-                    is_disabled: false,
-                    is_generator_disabled: false,
-                    permissioned: false,
-                    whitelist: None,
-                },
-            ],
+            pair_configs: vec![PairConfig {
+                code_id: pair_code_id,
+                pair_type: PairType::Xyk {},
+                total_fee_bps: 0,
+                maker_fee_bps: 0,
+                is_disabled: false,
+                is_generator_disabled: false,
+                permissioned: false,
+                whitelist: None,
+            }],
             token_code_id: cw20_token_code_id,
             fee_address: None,
             generator_address: None,
