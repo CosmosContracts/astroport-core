@@ -630,6 +630,17 @@ pub fn swap(
 
     let mut config = CONFIG.load(deps.storage)?;
 
+    // MEV-protection pause window. If the pair was instantiated with
+    // a future `pool_unpause_at`, reject swaps until that timestamp
+    // has elapsed. Liquidity provision/withdraw entry points are
+    // intentionally not gated — the seeder funds the pool before
+    // unpause. See planning/02-juno-patches.md.
+    if let Some(unpause_at) = config.pool_unpause_at {
+        if env.block.time < unpause_at {
+            return Err(ContractError::PoolPaused { unpause_at });
+        }
+    }
+
     // If the asset balance is already increased, we should subtract the user deposit from the pool amount
     let pools = config
         .pair_info
