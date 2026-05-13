@@ -24,8 +24,9 @@ This folder is contracts-only.
 | P1 — CI port | ✅ Complete (folded into rc0 commit `e32053da`) |
 | P2 — Patches (`pool_unpause_at`, types shim) | ✅ Complete (tagged `v0.1.1-juno-rc1` @ `84446eda`) |
 | P3 — Integration tests | ✅ Complete (5 commits @ `0e225a15..87c256ec`; 4 new tests in `integration-tests/`) |
-| **P2.5 — Incentives + gauge adapter** | **Planned** (`planning/11-incentives-and-gauges.md`; targets `v0.1.2-juno-rc2`) |
-| P4 — Audit handoff (3 diffs) | Blocked on P2.5 |
+| P2.5 — Incentives re-add + Juno strip | ✅ Complete (tagged `v0.1.2-juno-rc2` @ `15233816`; 6 commits; 4 new integration tests incl. cw20-reward AUDIT GATE; ADR D6) |
+| P2.5.9 — DAO DAO gauge adapter (dao-contracts side) | Pending — separate workstream on `feat/gauges` branch |
+| P4 — Audit handoff (3 diffs: A mechanical / B pool_unpause_at / C incentives) | Unblocked; pending |
 | P5 — Deploy infra | Pending |
 | P6 — uni-7 bakeoff | Pending |
 | P7 — juno-1 mainnet | Pending (DAO gate) |
