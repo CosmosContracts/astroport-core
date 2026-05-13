@@ -2,7 +2,7 @@
 
 use cosmwasm_std::{
     attr, coin, to_json_binary, Addr, Coin, Decimal, DepsMut, Empty, Env, MessageInfo, Response,
-    StdResult, Uint128, Uint64,
+    StdResult, Timestamp, Uint128, Uint64,
 };
 use cw20::{BalanceResponse, Cw20Coin, Cw20ExecuteMsg, Cw20QueryMsg, MinterResponse};
 
@@ -2338,4 +2338,284 @@ fn test_create_xyk_custom_type() {
         .unwrap();
 
     assert_eq!(res.pair_type, PairType::Xyk {});
+}
+
+// =====================================================================
+// pool_unpause_at — MEV-protection pause window
+//
+// See planning/02-juno-patches.md. The pair, when instantiated with
+// XYKPoolParams.pool_unpause_at = Some(future_ts), rejects Swap calls
+// until that timestamp has elapsed. ProvideLiquidity and
+// WithdrawLiquidity remain callable so the seeder can fund the pool
+// before the window expires.
+// =====================================================================
+
+/// Instantiate a pair whose swap gate stays closed until `unpause_at`.
+/// Mirrors `instantiate_pair` but threads `pool_unpause_at` through
+/// XYKPoolParams.
+fn instantiate_paused_pair(
+    mut router: &mut TestApp,
+    owner: &Addr,
+    unpause_at: Timestamp,
+) -> Addr {
+    let token_contract_code_id = store_token_code(&mut router);
+    let pair_contract_code_id = store_pair_code(&mut router);
+    let factory_code_id = store_factory_code(&mut router);
+
+    let init_msg = FactoryInstantiateMsg {
+        fee_address: None,
+        pair_configs: vec![PairConfig {
+            code_id: pair_contract_code_id,
+            maker_fee_bps: 0,
+            pair_type: PairType::Xyk {},
+            total_fee_bps: 0,
+            is_disabled: false,
+            is_generator_disabled: false,
+            permissioned: false,
+            whitelist: None,
+        }],
+        token_code_id: token_contract_code_id,
+        generator_address: Some(String::from("generator")),
+        owner: owner.to_string(),
+        whitelist_code_id: 234u64,
+        coin_registry_address: "coin_registry".to_string(),
+        tracker_config: None,
+    };
+
+    let factory_instance = router
+        .instantiate_contract(
+            factory_code_id,
+            owner.clone(),
+            &init_msg,
+            &[],
+            "FACTORY",
+            None,
+        )
+        .unwrap();
+
+    let init_params = to_json_binary(&XYKPoolParams {
+        track_asset_balances: None,
+        pool_unpause_at: Some(unpause_at),
+    })
+    .unwrap();
+
+    let msg = InstantiateMsg {
+        pair_type: PairType::Xyk {},
+        asset_infos: vec![
+            AssetInfo::NativeToken {
+                denom: "uusd".to_string(),
+            },
+            AssetInfo::NativeToken {
+                denom: "uluna".to_string(),
+            },
+        ],
+        token_code_id: token_contract_code_id,
+        factory_addr: factory_instance.to_string(),
+        init_params: Some(init_params),
+    };
+
+    router
+        .instantiate_contract(
+            pair_contract_code_id,
+            owner.clone(),
+            &msg,
+            &[],
+            String::from("PAIR"),
+            None,
+        )
+        .unwrap()
+}
+
+/// Provide liquidity to a paused pair from `owner`. Confirms the
+/// LP-side entry point is not gated by `pool_unpause_at`.
+fn seed_paused_pair(router: &mut TestApp, owner: &Addr, pair: &Addr) {
+    let (msg, coins) = provide_liquidity_msg(
+        Uint128::new(100_000_000_000),
+        Uint128::new(100_000_000_000),
+        None,
+        None,
+        None,
+    );
+    router
+        .execute_contract(owner.clone(), pair.clone(), &msg, &coins)
+        .expect("ProvideLiquidity must succeed during pause");
+}
+
+fn pause_test_app() -> TestApp {
+    mock_app(
+        Addr::unchecked(OWNER),
+        vec![
+            Coin {
+                denom: "uusd".to_string(),
+                amount: Uint128::new(1_000_000_000_000u128),
+            },
+            Coin {
+                denom: "uluna".to_string(),
+                amount: Uint128::new(1_000_000_000_000u128),
+            },
+        ],
+    )
+}
+
+#[test]
+fn swap_during_pause_rejects() {
+    let owner = Addr::unchecked(OWNER);
+    let mut app = pause_test_app();
+
+    let unpause_at = app.block_info().time.plus_seconds(60);
+    let pair = instantiate_paused_pair(&mut app, &owner, unpause_at);
+
+    // Liquidity provision must succeed during the pause window.
+    seed_paused_pair(&mut app, &owner, &pair);
+
+    // Swap before unpause_at must fail with PoolPaused.
+    let swap_msg = ExecuteMsg::Swap {
+        offer_asset: Asset {
+            info: AssetInfo::NativeToken {
+                denom: "uusd".to_owned(),
+            },
+            amount: Uint128::new(1_000_000),
+        },
+        ask_asset_info: None,
+        belief_price: None,
+        max_spread: None,
+        to: None,
+    };
+    let swap_funds = vec![Coin {
+        denom: "uusd".to_owned(),
+        amount: Uint128::new(1_000_000),
+    }];
+
+    let err = app
+        .execute_contract(owner.clone(), pair.clone(), &swap_msg, &swap_funds)
+        .unwrap_err();
+
+    assert_eq!(
+        err.downcast::<ContractError>().unwrap(),
+        ContractError::PoolPaused { unpause_at }
+    );
+}
+
+#[test]
+fn provide_and_withdraw_during_pause_succeeds() {
+    let owner = Addr::unchecked(OWNER);
+    let alice = Addr::unchecked("alice");
+    let mut app = pause_test_app();
+
+    // Seed Alice with funds for a second LP deposit + LP token transfer.
+    app.send_tokens(
+        owner.clone(),
+        alice.clone(),
+        &[
+            coin(50_000_000_000, "uusd"),
+            coin(50_000_000_000, "uluna"),
+        ],
+    )
+    .unwrap();
+
+    let unpause_at = app.block_info().time.plus_seconds(120);
+    let pair = instantiate_paused_pair(&mut app, &owner, unpause_at);
+
+    // Owner provides liquidity first to mint the LP token denom.
+    seed_paused_pair(&mut app, &owner, &pair);
+
+    // Alice provides liquidity during the pause window — must succeed.
+    let (msg, coins) = provide_liquidity_msg(
+        Uint128::new(10_000_000_000),
+        Uint128::new(10_000_000_000),
+        None,
+        None,
+        None,
+    );
+    app.execute_contract(alice.clone(), pair.clone(), &msg, &coins)
+        .expect("ProvideLiquidity during pause must succeed");
+
+    // Owner withdraws a slice — must succeed during the pause window.
+    let pair_info: PairInfo = app
+        .wrap()
+        .query_wasm_smart(pair.clone(), &QueryMsg::Pair {})
+        .unwrap();
+    let lp_denom = pair_info.liquidity_token;
+    let lp_balance = app
+        .wrap()
+        .query_balance(owner.as_str(), &lp_denom)
+        .unwrap()
+        .amount;
+    assert!(lp_balance > Uint128::zero(), "owner should hold LP tokens");
+
+    let withdraw_msg = ExecuteMsg::WithdrawLiquidity {
+        assets: vec![],
+        min_assets_to_receive: None,
+    };
+    let withdraw_funds = vec![Coin {
+        denom: lp_denom.clone(),
+        amount: lp_balance / Uint128::new(10),
+    }];
+    app.execute_contract(owner.clone(), pair.clone(), &withdraw_msg, &withdraw_funds)
+        .expect("WithdrawLiquidity during pause must succeed");
+
+    // Block.time is still before unpause_at — confirm a swap still rejects.
+    let swap_msg = ExecuteMsg::Swap {
+        offer_asset: Asset {
+            info: AssetInfo::NativeToken {
+                denom: "uusd".to_owned(),
+            },
+            amount: Uint128::new(1_000_000),
+        },
+        ask_asset_info: None,
+        belief_price: None,
+        max_spread: None,
+        to: None,
+    };
+    let swap_funds = vec![Coin {
+        denom: "uusd".to_owned(),
+        amount: Uint128::new(1_000_000),
+    }];
+    let err = app
+        .execute_contract(owner.clone(), pair.clone(), &swap_msg, &swap_funds)
+        .unwrap_err();
+    assert_eq!(
+        err.downcast::<ContractError>().unwrap(),
+        ContractError::PoolPaused { unpause_at }
+    );
+}
+
+#[test]
+fn unpause_elapses_then_swap_works() {
+    let owner = Addr::unchecked(OWNER);
+    let mut app = pause_test_app();
+
+    let unpause_at = app.block_info().time.plus_seconds(60);
+    let pair = instantiate_paused_pair(&mut app, &owner, unpause_at);
+    seed_paused_pair(&mut app, &owner, &pair);
+
+    // Confirm swap is blocked at block.time < unpause_at.
+    let swap_msg = ExecuteMsg::Swap {
+        offer_asset: Asset {
+            info: AssetInfo::NativeToken {
+                denom: "uusd".to_owned(),
+            },
+            amount: Uint128::new(1_000_000),
+        },
+        ask_asset_info: None,
+        belief_price: None,
+        max_spread: None,
+        to: None,
+    };
+    let swap_funds = vec![Coin {
+        denom: "uusd".to_owned(),
+        amount: Uint128::new(1_000_000),
+    }];
+    app.execute_contract(owner.clone(), pair.clone(), &swap_msg, &swap_funds)
+        .unwrap_err();
+
+    // Advance block.time past the pause window.
+    app.update_block(|b| {
+        b.time = b.time.plus_seconds(61);
+        b.height += 1;
+    });
+
+    // Swap must now succeed.
+    app.execute_contract(owner.clone(), pair.clone(), &swap_msg, &swap_funds)
+        .expect("Swap after unpause_at must succeed");
 }
