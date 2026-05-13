@@ -16,3 +16,11 @@ crate-type = ["rlib"]
 cosmwasm-schema.workspace = true
 cosmwasm-std.workspace = true
 cw20 = "1.1"
+
+[dev-dependencies]
+# Dev-dep only so the wire-drift test can assert that the shim's
+# serialized JSON deserializes 1:1 into the upstream GPL types.
+# The shipped library has no GPL linkage.
+astroport.workspace = true
+serde = "1.0"
+serde_json = "1.0"

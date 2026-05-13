@@ -143,9 +143,12 @@ dependencies = [
 name = "astroport-juno-types"
 version = "0.1.0"
 dependencies = [
+ "astroport 5.13.1",
  "cosmwasm-schema",
  "cosmwasm-std",
  "cw20 1.1.2",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

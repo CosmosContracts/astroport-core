@@ -1,0 +1,21 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TrackerConfig",
+  "description": "Tokenfactory tracker hook configuration. None ⇒ no tracker.",
+  "type": "object",
+  "required": [
+    "code_id",
+    "token_factory_addr"
+  ],
+  "properties": {
+    "code_id": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "token_factory_addr": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,100 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PairConfig",
+  "description": "A pair-type configuration entry registered in the factory.",
+  "type": "object",
+  "required": [
+    "code_id",
+    "maker_fee_bps",
+    "pair_type",
+    "total_fee_bps"
+  ],
+  "properties": {
+    "code_id": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "is_disabled": {
+      "default": false,
+      "type": "boolean"
+    },
+    "is_generator_disabled": {
+      "default": false,
+      "type": "boolean"
+    },
+    "maker_fee_bps": {
+      "type": "integer",
+      "format": "uint16",
+      "minimum": 0.0
+    },
+    "pair_type": {
+      "$ref": "#/definitions/PairType"
+    },
+    "permissioned": {
+      "default": false,
+      "type": "boolean"
+    },
+    "total_fee_bps": {
+      "type": "integer",
+      "format": "uint16",
+      "minimum": 0.0
+    },
+    "whitelist": {
+      "default": null,
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "PairType": {
+      "description": "Available pair types in the factory's registry.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "xyk"
+          ],
+          "properties": {
+            "xyk": {
+              "type": "object",
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "stable"
+          ],
+          "properties": {
+            "stable": {
+              "type": "object",
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "custom"
+          ],
+          "properties": {
+            "custom": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

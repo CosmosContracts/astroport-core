@@ -1,0 +1,177 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "InstantiateMsg",
+  "description": "Factory instantiate parameters.",
+  "type": "object",
+  "required": [
+    "coin_registry_address",
+    "owner",
+    "pair_configs",
+    "token_code_id",
+    "whitelist_code_id"
+  ],
+  "properties": {
+    "coin_registry_address": {
+      "type": "string"
+    },
+    "fee_address": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "generator_address": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "owner": {
+      "type": "string"
+    },
+    "pair_configs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/PairConfig"
+      }
+    },
+    "token_code_id": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "tracker_config": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/TrackerConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "whitelist_code_id": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "PairConfig": {
+      "description": "A pair-type configuration entry registered in the factory.",
+      "type": "object",
+      "required": [
+        "code_id",
+        "maker_fee_bps",
+        "pair_type",
+        "total_fee_bps"
+      ],
+      "properties": {
+        "code_id": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "is_disabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "is_generator_disabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "maker_fee_bps": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "pair_type": {
+          "$ref": "#/definitions/PairType"
+        },
+        "permissioned": {
+          "default": false,
+          "type": "boolean"
+        },
+        "total_fee_bps": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "whitelist": {
+          "default": null,
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "PairType": {
+      "description": "Available pair types in the factory's registry.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "xyk"
+          ],
+          "properties": {
+            "xyk": {
+              "type": "object",
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "stable"
+          ],
+          "properties": {
+            "stable": {
+              "type": "object",
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "custom"
+          ],
+          "properties": {
+            "custom": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "TrackerConfig": {
+      "description": "Tokenfactory tracker hook configuration. None ⇒ no tracker.",
+      "type": "object",
+      "required": [
+        "code_id",
+        "token_factory_addr"
+      ],
+      "properties": {
+        "code_id": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "token_factory_addr": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

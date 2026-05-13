@@ -1,0 +1,45 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PairType",
+  "description": "Available pair types in the factory's registry.",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "xyk"
+      ],
+      "properties": {
+        "xyk": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "stable"
+      ],
+      "properties": {
+        "stable": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "custom"
+      ],
+      "properties": {
+        "custom": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  ]
+}
