@@ -1,0 +1,117 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "QueryMsg",
+  "description": "The incentives query surface that UIs and downstream contracts need. Admin-only / paginated audit queries (`PoolStakers`, `BlockedTokensList`, `ExternalRewardSchedules`, `IsFeeExpected`, `ListPools`) are NOT mirrored; they're not on the critical path for any non-UI consumer.",
+  "oneOf": [
+    {
+      "description": "Returns the LP token amount deposited in a specific generator by a specific user. Returns 0 if no position exists.",
+      "type": "object",
+      "required": [
+        "deposit"
+      ],
+      "properties": {
+        "deposit": {
+          "type": "object",
+          "required": [
+            "lp_token",
+            "user"
+          ],
+          "properties": {
+            "lp_token": {
+              "type": "string"
+            },
+            "user": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Returns the amount of rewards that can be claimed by an account that deposited a specific LP token.",
+      "type": "object",
+      "required": [
+        "pending_rewards"
+      ],
+      "properties": {
+        "pending_rewards": {
+          "type": "object",
+          "required": [
+            "lp_token",
+            "user"
+          ],
+          "properties": {
+            "lp_token": {
+              "type": "string"
+            },
+            "user": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Returns reward info for a specified LP token.",
+      "type": "object",
+      "required": [
+        "reward_info"
+      ],
+      "properties": {
+        "reward_info": {
+          "type": "object",
+          "required": [
+            "lp_token"
+          ],
+          "properties": {
+            "lp_token": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Returns info about the pool associated with the specified LP token.",
+      "type": "object",
+      "required": [
+        "pool_info"
+      ],
+      "properties": {
+        "pool_info": {
+          "type": "object",
+          "required": [
+            "lp_token"
+          ],
+          "properties": {
+            "lp_token": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "description": "Returns the list of all pools receiving internal (DAO-funded) emissions, with their alloc_points.",
+      "type": "object",
+      "required": [
+        "active_pools"
+      ],
+      "properties": {
+        "active_pools": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  ]
+}

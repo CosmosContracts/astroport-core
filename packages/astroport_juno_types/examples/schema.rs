@@ -23,6 +23,7 @@ fn emit_in(subdir: &str, exports: impl FnOnce(&PathBuf)) {
 fn main() {
     use astroport_juno_types::asset::{Asset, AssetInfo, PairInfo};
     use astroport_juno_types::factory as f;
+    use astroport_juno_types::incentives as i;
     use astroport_juno_types::pair as p;
     use astroport_juno_types::router as r;
 
@@ -65,5 +66,14 @@ fn main() {
         export_schema(&schema_for!(r::SwapResponseData), out_dir);
         export_schema(&schema_for!(r::SimulateSwapOperationsResponse), out_dir);
         export_schema(&schema_for!(r::ConfigResponse), out_dir);
+    });
+
+    emit_in("incentives", |out_dir| {
+        export_schema(&schema_for!(i::InputSchedule), out_dir);
+        export_schema(&schema_for!(i::ExecuteMsg), out_dir);
+        export_schema(&schema_for!(i::QueryMsg), out_dir);
+        export_schema(&schema_for!(i::RewardType), out_dir);
+        export_schema(&schema_for!(i::RewardInfo), out_dir);
+        export_schema(&schema_for!(i::PoolInfoResponse), out_dir);
     });
 }

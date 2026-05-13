@@ -249,7 +249,8 @@ pub fn incentivize(
     // Otherwise, reward token will be removed from the pool info and go to outstanding rewards.
     // Next schedules with the same token will be considered as "new".
     // ASTRO rewards don't require incentivize fee.
-    if rewards_number_before < pool_info.rewards.len() && schedule.reward_info != config.reward_token
+    if rewards_number_before < pool_info.rewards.len()
+        && schedule.reward_info != config.reward_token
     {
         // If fee set we expect to receive it
         if let Some(incentivization_fee_info) = &config.incentivization_fee_info {

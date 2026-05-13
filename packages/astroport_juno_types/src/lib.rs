@@ -15,5 +15,6 @@
 
 pub mod asset;
 pub mod factory;
+pub mod incentives;
 pub mod pair;
 pub mod router;
