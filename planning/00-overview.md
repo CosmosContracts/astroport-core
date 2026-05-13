@@ -76,6 +76,7 @@ Three diffs to the AI audit; one mechanical (A), two functional (B, C). See
 | `09-roadmap-v1.1-v1.2.md` | Stable pair re-add, PCL re-add, post-v1 surfaces. |
 | `10-open-questions.md` | Running list. |
 | `11-incentives-and-gauges.md` | (P2.5) Re-introduce `astroport-incentives`; bind to DAO DAO gauge for community-voted emissions; permissionless external incentives. |
+| `12-incentives-strip-decisions.md` | (P2.5) ADR D6 — per-decision rationale for the rc1→rc2 strip (vesting, cw20 axes, naming, MAX_REWARD_TOKENS, generator_controller, bech32 test mode). |
 
 Files marked "(P*)" are stubs until that phase begins.
 
