@@ -1044,6 +1044,7 @@ fn asset_balances_tracking_works_correctly() {
         init_params: Some(
             to_json_binary(&XYKPoolParams {
                 track_asset_balances: Some(true),
+                pool_unpause_at: None,
             })
             .unwrap(),
         ),
@@ -1784,6 +1785,7 @@ fn test_fee_share(
         init_params: Some(
             to_json_binary(&XYKPoolParams {
                 track_asset_balances: Some(true),
+                pool_unpause_at: None,
             })
             .unwrap(),
         ),
@@ -2118,6 +2120,7 @@ fn test_tracker_contract() {
         init_params: Some(
             to_json_binary(&XYKPoolParams {
                 track_asset_balances: Some(true),
+                pool_unpause_at: None,
             })
             .unwrap(),
         ),

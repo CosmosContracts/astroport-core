@@ -231,6 +231,16 @@ pub struct XYKPoolParams {
     /// They will not be tracked if the parameter is ignored.
     /// It can not be disabled later once enabled.
     pub track_asset_balances: Option<bool>,
+    /// Optional UTC timestamp; while `block.time < pool_unpause_at`,
+    /// the pair rejects `Swap` calls with `ContractError::PoolPaused`.
+    /// `ProvideLiquidity` and `WithdrawLiquidity` remain callable
+    /// during the pause window so the seeder can fund the pool.
+    /// `None` (the default and wire-default for older callers) means
+    /// no pause is enforced. Set by the cw-abc graduation flow per
+    /// `memory/abc-graduation-architecture-astroport.md`. Cannot be
+    /// changed after instantiation.
+    #[serde(default)]
+    pub pool_unpause_at: Option<cosmwasm_std::Timestamp>,
 }
 
 /// This structure stores a XYK pool's configuration.

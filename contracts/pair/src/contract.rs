@@ -66,10 +66,12 @@ pub fn instantiate(
     }
 
     let mut track_asset_balances = false;
+    let mut pool_unpause_at = None;
 
     if let Some(init_params) = msg.init_params {
         let params: XYKPoolParams = from_json(init_params)?;
         track_asset_balances = params.track_asset_balances.unwrap_or_default();
+        pool_unpause_at = params.pool_unpause_at;
     }
 
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
@@ -88,6 +90,7 @@ pub fn instantiate(
         track_asset_balances,
         fee_share: None,
         tracker_addr: None,
+        pool_unpause_at,
     };
 
     if track_asset_balances {

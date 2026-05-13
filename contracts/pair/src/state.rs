@@ -3,7 +3,7 @@ use astroport::{
     pair::FeeShareConfig,
 };
 use cosmwasm_schema::cw_serde;
-use cosmwasm_std::{Addr, Uint128};
+use cosmwasm_std::{Addr, Timestamp, Uint128};
 use cw_storage_plus::{Item, SnapshotMap};
 
 /// This structure stores the main config parameters for a constant product pair contract.
@@ -25,6 +25,12 @@ pub struct Config {
     pub fee_share: Option<FeeShareConfig>,
     /// Stores the tracker contract address
     pub tracker_addr: Option<Addr>,
+    /// Optional MEV-protection pause window. While
+    /// `block.time < pool_unpause_at`, `Swap` is rejected with
+    /// `ContractError::PoolPaused`. LP entry points remain callable.
+    /// Set once at instantiate from `XYKPoolParams.pool_unpause_at`;
+    /// cannot be mutated.
+    pub pool_unpause_at: Option<Timestamp>,
 }
 
 /// Stores the config struct at the given key
