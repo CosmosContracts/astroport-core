@@ -1503,7 +1503,6 @@ fn enable_disable_fee_sharing() {
     );
 }
 
-
 #[test]
 fn test_imbalanced_withdraw_is_disabled() {
     let owner = Addr::unchecked("owner");

@@ -55,11 +55,11 @@ impl<'a, V> CircularBuffer<'a, V> {
         }
     }
 
-    pub const fn state(&'a self) -> Item<BufferState> {
+    pub const fn state(&'a self) -> Item<'a, BufferState> {
         Item::new(self.state_key)
     }
 
-    pub const fn array(&'a self) -> Map<u32, V> {
+    pub const fn array(&'a self) -> Map<'a, u32, V> {
         Map::new(self.array_namespace)
     }
 }
