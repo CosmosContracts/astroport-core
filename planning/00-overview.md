@@ -20,10 +20,10 @@ This folder is contracts-only.
 
 | Phase | State |
 |---|---|
-| P0 — Strip-and-green | In progress |
-| P1 — CI port | Pending |
-| P2 — Patches (`pool_unpause_at`, types shim) | Pending |
-| P3 — Integration tests | Pending |
+| P0 — Strip-and-green | ✅ Complete (tagged `v0.1.0-juno-rc0` @ `4f7e63a9`) |
+| P1 — CI port | ✅ Complete (folded into rc0 commit `e32053da`) |
+| P2 — Patches (`pool_unpause_at`, types shim) | ✅ Complete (tagged `v0.1.1-juno-rc1` @ `84446eda`) |
+| P3 — Integration tests | ✅ Complete (5 commits @ `0e225a15..87c256ec`; 4 new tests in `integration-tests/`) |
 | P4 — Audit handoff | Pending |
 | P5 — Deploy infra | Pending |
 | P6 — uni-7 bakeoff | Pending |
