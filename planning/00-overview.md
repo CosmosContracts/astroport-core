@@ -24,7 +24,8 @@ This folder is contracts-only.
 | P1 — CI port | ✅ Complete (folded into rc0 commit `e32053da`) |
 | P2 — Patches (`pool_unpause_at`, types shim) | ✅ Complete (tagged `v0.1.1-juno-rc1` @ `84446eda`) |
 | P3 — Integration tests | ✅ Complete (5 commits @ `0e225a15..87c256ec`; 4 new tests in `integration-tests/`) |
-| P4 — Audit handoff | Pending |
+| **P2.5 — Incentives + gauge adapter** | **Planned** (`planning/11-incentives-and-gauges.md`; targets `v0.1.2-juno-rc2`) |
+| P4 — Audit handoff (3 diffs) | Blocked on P2.5 |
 | P5 — Deploy infra | Pending |
 | P6 — uni-7 bakeoff | Pending |
 | P7 — juno-1 mainnet | Pending (DAO gate) |
@@ -35,8 +36,11 @@ This folder is contracts-only.
   change to kept contracts. Audit diff A target.
 - **`v0.1.1-juno-rc1`** — `pool_unpause_at` patch + `astroport-juno-types`
   MIT shim crate. Audit diff B target.
+- **`v0.1.2-juno-rc2`** *(planned, P2.5)* — re-introduce stripped
+  `astroport-incentives` from upstream `v5.13.1` + extend MIT shim with
+  incentives wire types. Audit diff C target. See `11-incentives-and-gauges.md`.
 
-Two diffs to the AI audit; one mechanical (A), one functional (B). See
+Three diffs to the AI audit; one mechanical (A), two functional (B, C). See
 `07-audit-scope.md`.
 
 ## Operating posture (settled 2026-05-13)
@@ -71,6 +75,7 @@ Two diffs to the AI audit; one mechanical (A), one functional (B). See
 | `08-test-matrix.md` | (P3) Gates per phase. |
 | `09-roadmap-v1.1-v1.2.md` | Stable pair re-add, PCL re-add, post-v1 surfaces. |
 | `10-open-questions.md` | Running list. |
+| `11-incentives-and-gauges.md` | (P2.5) Re-introduce `astroport-incentives`; bind to DAO DAO gauge for community-voted emissions; permissionless external incentives. |
 
 Files marked "(P*)" are stubs until that phase begins.
 
