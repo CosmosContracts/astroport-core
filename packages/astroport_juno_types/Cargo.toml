@@ -1,0 +1,18 @@
+[package]
+name = "astroport-juno-types"
+version = "0.1.0"
+authors = ["Juno Network <https://junonetwork.io>"]
+edition = "2021"
+description = "MIT-licensed wire-type mirror for astroport-juno (factory, pair, router, asset). Lets downstream CosmWasm contracts construct cross-contract calls into astroport-juno without inheriting GPL-3.0 via Rust linkage."
+license = "MIT"
+repository = "https://github.com/astroport-fi/astroport-core"
+homepage = "https://junonetwork.io"
+documentation = "https://docs.rs/astroport-juno-types"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+cosmwasm-schema.workspace = true
+cosmwasm-std.workspace = true
+cw20 = "1.1"

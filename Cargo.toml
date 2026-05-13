@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "packages/astroport",
+    "packages/astroport_juno_types",
     "packages/astroport_test",
     "packages/circular_buffer",
     "contracts/factory",
