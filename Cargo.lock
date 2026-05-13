@@ -154,6 +154,7 @@ dependencies = [
  "cosmwasm-schema",
  "cosmwasm-std",
  "cw1-whitelist",
+ "cw2 1.1.2",
  "cw20 1.1.2",
  "cw20-base",
 ]

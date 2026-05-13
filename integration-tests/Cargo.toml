@@ -23,5 +23,6 @@ astroport-native-coin-registry = { path = "../contracts/periphery/native_coin_re
 astroport-test = { path = "../packages/astroport_test", features = ["cosmwasm_1_1"] }
 
 anyhow = "1.0"
+cw2 = "1.1"
 cw20-base = "1.1"
 cw1-whitelist = { version = "1.1", features = ["library"] }
