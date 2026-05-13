@@ -20,7 +20,7 @@ jobs:
           access_token: ${{ github.token }}
 
       - name: Checkout sources
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Restore cached cargo artifacts
         uses: actions/cache@v4
@@ -71,7 +71,7 @@ jobs:
         run: cargo install --version 1.5.11 cosmwasm-check
 
       - name: Checkout sources
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       - name: Restore cached artifacts
         uses: actions/cache/restore@v4
         with:
@@ -81,4 +81,11 @@ jobs:
 
       - name: Cosmwasm check
         run: |
-          cosmwasm-check $GITHUB_WORKSPACE/artifacts/*.wasm --available-capabilities staking,cosmwasm_1_1,neutron,iterator,stargate
+          # Juno wasmvm capability set (post-v30 ships wasmvm v3.0.4):
+          # - no `neutron` capability (upstream Astroport included it for the
+          #   pair_concentrated_duality Slinky-CL precompile, which we deleted).
+          # - `cosmwasm_2_0` added for forward compat with interface_version_9
+          #   contracts on wasmvm v3.0.4. Astroport v5.13.1 itself ships
+          #   cosmwasm-std 1.5 (interface_version_8), so the v2.0 capability
+          #   is preparatory — it doesn't gate the current wasms.
+          cosmwasm-check $GITHUB_WORKSPACE/artifacts/*.wasm --available-capabilities staking,cosmwasm_1_1,cosmwasm_2_0,iterator,stargate

@@ -16,12 +16,12 @@ jobs:
 
     steps:
       - name: Cancel Previous Runs
-        uses: styfle/cancel-workflow-action@0.11.0
+        uses: styfle/cancel-workflow-action@0.12.1
         with:
           access_token: ${{ github.token }}
 
       - name: Checkout sources
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       - uses: actions/cache@v4
         if: always()
         with:
@@ -36,30 +36,21 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Install stable toolchain
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          profile: minimal
           toolchain: 1.81.0
-          override: true
           components: rustfmt, clippy
 
       - name: Run cargo fmt
-        uses: actions-rs/cargo@v1
-        with:
-          command: fmt
-          args: --all -- --check
+        run: cargo fmt --all -- --check
 
       - name: Run cargo clippy
-        uses: actions-rs/cargo@v1
-        with:
-          command: clippy
-          args: -- -D warnings -A unexpected_cfgs
+        run: cargo clippy -- -D warnings -A unexpected_cfgs
 
+      # `--features tests-tube` was for osmosis-test-tube integration tests;
+      # the stripped workspace no longer carries that surface.
       - name: Run tests
-        uses: actions-rs/cargo@v1
-        with:
-          command: test
-          args: --features tests-tube --no-fail-fast --locked
+        run: cargo test --workspace --no-fail-fast --locked
         env:
           RUST_BACKTRACE: 1
 
@@ -67,4 +58,4 @@ jobs:
         run: |
           $GITHUB_WORKSPACE/scripts/build_schemas.sh
           git add -A $GITHUB_WORKSPACE/schemas # consider new contract schemas
-          git diff-index --cached HEAD --exit-code  --
+          git diff-index --cached HEAD --exit-code --

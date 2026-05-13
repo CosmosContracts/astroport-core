@@ -3,9 +3,12 @@
 set -e
 set -o pipefail
 
-# terra: https://github.com/terra-money/wasmd/blob/2308975f45eac299bdf246737674482eaa51051c/x/wasm/types/validation.go#L12
-# injective: https://github.com/InjectiveLabs/wasmd/blob/e087f275712b5f0a798791495dee0e453d67cad3/x/wasm/types/validation.go#L19
-maximum_size=800
+# Juno wasmd default MaxWasmCodeSize is ~3 MB (3 * 1024 * 1024 bytes).
+# Upstream Astroport pinned this to 800 KB to match Terra's and Injective's
+# tighter wasmd limits; that ceiling doesn't apply on Juno. We keep some
+# headroom margin under Juno's real limit so artifacts don't surprise the
+# governance upload path.
+maximum_size=3072
 
 for artifact in artifacts/*.wasm; do
   artifactsize=$(du -k "$artifact" | cut -f 1)

@@ -24,7 +24,7 @@ jobs:
           access_token: ${{ github.token }}
 
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       - uses: actions/cache@v4
         with:
           path: |
@@ -38,11 +38,9 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Install stable toolchain
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          profile: minimal
           toolchain: 1.81.0
-          override: true
 
       - name: Install cargo-tarpaulin
         run: cargo install --locked cargo-tarpaulin@0.32.0 || true
@@ -50,9 +48,7 @@ jobs:
       - name: Run cargo-tarpaulin
         run: cargo tarpaulin --out Xml
 
-      - name: Upload to codecov.io
-        if: github.ref == 'refs/heads/main'
-        uses: codecov/codecov-action@v3
-        with:
-          token: ${{secrets.CODECOV_TOKEN}}
-          fail_ci_if_error: true
+      # Codecov upload removed for the Juno fork (was tied to astroport-fi's
+      # CODECOV_TOKEN secret). Coverage report is generated locally as XML
+      # and surfaced via the workflow logs. Re-add when this fork has its
+      # own Codecov project + token.
