@@ -18,9 +18,7 @@
 use anyhow::Result as AnyResult;
 use cosmwasm_std::{coin, Addr, Coin, Uint128};
 
-use astroport::factory::{
-    InstantiateMsg as FactoryInstantiateMsg, PairConfig, PairType,
-};
+use astroport::factory::{InstantiateMsg as FactoryInstantiateMsg, PairConfig, PairType};
 use astroport::native_coin_registry::{
     ExecuteMsg as RegistryExecuteMsg, InstantiateMsg as RegistryInstantiateMsg,
 };
@@ -66,9 +64,7 @@ pub fn mock_app() -> TestApp {
     ];
     AppBuilder::new_custom()
         .with_stargate(MockStargate::default())
-        .build(|router, _, storage| {
-            router.bank.init_balance(storage, &deployer, coins).unwrap()
-        })
+        .build(|router, _, storage| router.bank.init_balance(storage, &deployer, coins).unwrap())
 }
 
 fn store_factory_code(app: &mut TestApp) -> u64 {

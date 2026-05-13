@@ -9,8 +9,8 @@ use astroport::asset::{Asset, AssetInfo, PairInfo};
 use astroport::factory::{ExecuteMsg as FactoryExecuteMsg, PairType, QueryMsg as FactoryQueryMsg};
 use astroport::pair::ExecuteMsg as PairExecuteMsg;
 use astroport::router::{
-    ExecuteMsg as RouterExecuteMsg, QueryMsg as RouterQueryMsg,
-    SimulateSwapOperationsResponse, SwapOperation,
+    ExecuteMsg as RouterExecuteMsg, QueryMsg as RouterQueryMsg, SimulateSwapOperationsResponse,
+    SwapOperation,
 };
 use astroport_test::cw_multi_test::Executor;
 use astroport_test::modules::stargate::StargateApp;

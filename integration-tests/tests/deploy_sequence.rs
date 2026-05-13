@@ -249,10 +249,7 @@ fn provide_liquidity(
         receiver: None,
         min_lp_to_receive: None,
     };
-    let funds = vec![
-        coin(ujuno_amount, UJUNO),
-        coin(usdc_amount, MOCK_USDC),
-    ];
+    let funds = vec![coin(ujuno_amount, UJUNO), coin(usdc_amount, MOCK_USDC)];
     // ProvideLiquidity expects funds sorted lexicographically by denom.
     let mut funds = funds;
     funds.sort_by(|a, b| a.denom.cmp(&b.denom));
