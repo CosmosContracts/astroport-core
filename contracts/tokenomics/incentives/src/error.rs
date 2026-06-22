@@ -67,9 +67,6 @@ pub enum ContractError {
     #[error("Failed to set 0 alloc point for pool {lp_token}")]
     ZeroAllocPoint { lp_token: String },
 
-    #[error("Failed to migrate contract")]
-    MigrationError {},
-
     #[error("Unsupported migration from {from_contract} {from_version} to {to_contract} {to_version}: upstream Astroport state shape is incompatible with the Juno fork (Config.astro_token → reward_token, vesting_contract removed). Re-instantiate instead of migrating.")]
     UnsupportedMigrationVersion {
         from_contract: String,

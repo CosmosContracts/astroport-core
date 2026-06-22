@@ -441,14 +441,22 @@ pub fn get_pair_from_denom(deps: Deps, denom: &str) -> StdResult<Addr> {
 /// Checks if the pool with the following asset infos is registered in the factory contract and
 /// LP tokens address/denom matches the one registered in the factory.
 ///
-/// Astroport-Juno hardening (audit finding HIGH): the previous native-token
-/// branch only validated the bech32 shape of the embedded lp-minter address,
-/// which let any caller invent a `factory/<some-valid-addr>/<lp-suffix>` denom
-/// and pass it to `Incentivize` to seed fake rewards. We now round-trip the
-/// pair contract — `pair::QueryMsg::Pair {}` returns its declared
-/// `liquidity_token`, which must match the supplied denom exactly. This makes
-/// `is_valid_pool` reject every denom that isn't actually minted by a
-/// real Astroport pair, regardless of bech32 plausibility.
+/// Astroport-Juno hardening (audit findings HIGH x2):
+///
+/// rc3 first pass: the upstream native-token branch only validated the bech32
+/// shape of the embedded lp-minter, which let any caller invent a
+/// `factory/<some-valid-addr>/<lp-suffix>` denom and seed fake rewards. rc3
+/// added a `pair::QueryMsg::Pair {}` round-trip against the alleged
+/// lp-minter — but that query targets the attacker's own contract, which
+/// can forge the response, so this gate alone is insufficient.
+///
+/// rc4 closure: after the pair-self-query, also consult the factory's PAIRS
+/// registry (mirroring the cw20 branch at lines 478-503) and require that
+/// (a) the factory has a pair registered for `pair_info.asset_infos` AND
+/// (b) the registered `contract_addr` equals the lp-minter AND
+/// (c) the registered `liquidity_token` equals the supplied denom.
+/// Spoofing now requires subverting the factory registry, which is
+/// owner-gated.
 pub fn is_valid_pool(deps: Deps, config: &Config, lp_token: &AssetInfo) -> StdResult<()> {
     if let AssetInfo::NativeToken { denom } = lp_token {
         // Shape check first — fails fast for obvious non-LP denoms before we
@@ -470,6 +478,38 @@ pub fn is_valid_pool(deps: Deps, config: &Config, lp_token: &AssetInfo) -> StdRe
             return Err(StdError::generic_err(format!(
                 "LP token {denom} doesn't match LP token registered in pair {}",
                 pair_info.liquidity_token
+            )));
+        }
+
+        // Factory cross-check: the lp-minter must be the address the factory
+        // has registered for this asset pair. Without this, an attacker can
+        // deploy a fake-pair contract that forges the self-query response.
+        let registered: PairInfo = deps
+            .querier
+            .query_wasm_smart(
+                &config.factory,
+                &factory::QueryMsg::Pair {
+                    asset_infos: pair_info.asset_infos.to_vec(),
+                },
+            )
+            .map_err(|_| {
+                StdError::generic_err(format!(
+                    "The pair is not registered in factory: {}-{}",
+                    pair_info.asset_infos[0], pair_info.asset_infos[1]
+                ))
+            })?;
+
+        if registered.contract_addr != lp_minter {
+            return Err(StdError::generic_err(format!(
+                "LP token {denom} claims pair {lp_minter} but factory registers {} for this asset pair",
+                registered.contract_addr
+            )));
+        }
+
+        if registered.liquidity_token != *denom {
+            return Err(StdError::generic_err(format!(
+                "LP token {denom} doesn't match LP token registered in factory {}",
+                registered.liquidity_token
             )));
         }
 
@@ -818,5 +858,80 @@ mod unit_tests {
         let msg = err.to_string();
         assert!(msg.contains("factory/juno1xxx/astroport/share"));
         assert!(msg.contains("ACTIVE_POOLS"));
+    }
+
+    /// `deactivate_pool` must return the typed `ActivePoolInvariantBroken`
+    /// error (rather than panicking via `.unwrap()`) when `PoolInfo` claims
+    /// to be active but the corresponding `ACTIVE_POOLS` entry is missing.
+    /// Triggers the invariant break through the real production call site,
+    /// not just the Display impl — closes the rc4 R5 finding that the prior
+    /// test only guarded the error message format.
+    #[test]
+    fn deactivate_pool_returns_typed_error_when_invariant_broken() {
+        use crate::state::PoolInfo;
+        use astroport::asset::AssetInfo;
+        use astroport::incentives::{Config, RewardInfo, RewardType};
+        use cosmwasm_std::testing::{mock_env, mock_info};
+        use cosmwasm_std::{Decimal256, Uint128};
+
+        let mut deps = mock_dependencies();
+        let env = mock_env();
+        let factory = deps.api.addr_make("factory");
+        let owner = deps.api.addr_make("owner");
+        let reward_token = AssetInfo::native("ujuno");
+        let lp_token = "factory/juno1lpxxx/astroport/share".to_string();
+        let lp_asset = AssetInfo::native(&lp_token);
+
+        // Seed a Config whose factory matches the simulated caller.
+        CONFIG
+            .save(
+                deps.as_mut().storage,
+                &Config {
+                    owner,
+                    factory: factory.clone(),
+                    generator_controller: None,
+                    reward_token: reward_token.clone(),
+                    reward_per_second: Uint128::new(1000),
+                    total_alloc_points: Uint128::new(100),
+                    guardian: None,
+                    incentivization_fee_info: None,
+                    token_transfer_gas_limit: None,
+                },
+            )
+            .unwrap();
+
+        // Seed an "active" PoolInfo — non-zero internal rps so
+        // `is_active_pool()` returns true and the deactivate_pool match
+        // arm enters the `Some(_) if pool_info.is_active_pool()` branch.
+        let mut pool_info = PoolInfo {
+            total_lp: Uint128::zero(),
+            rewards: vec![RewardInfo {
+                reward: RewardType::Int(reward_token.clone()),
+                rps: Decimal256::from_ratio(1u128, 1u128),
+                index: Decimal256::zero(),
+                orphaned: Decimal256::zero(),
+            }],
+            last_update_ts: env.block.time.seconds(),
+            rewards_to_remove: Default::default(),
+        };
+        pool_info.save(deps.as_mut().storage, &lp_asset).unwrap();
+
+        // Seed ACTIVE_POOLS with the desync invariant breach — empty list,
+        // even though PoolInfo above claims to be active.
+        ACTIVE_POOLS.save(deps.as_mut().storage, &vec![]).unwrap();
+
+        // Call the production deactivate_pool from the factory. Pre-rc3
+        // this would panic via `.unwrap()`; rc3 made it return the typed
+        // error; this test pins that contract so a future refactor can't
+        // silently re-introduce the unwrap.
+        let info = mock_info(factory.as_str(), &[]);
+        let err = deactivate_pool(deps.as_mut(), info, env, lp_token.clone())
+            .expect_err("desynced state must surface the typed error, not panic");
+
+        let lp_token_for_match = lp_token.clone();
+        assert!(
+            matches!(err, ContractError::ActivePoolInvariantBroken { lp_token: ref t } if t == &lp_token_for_match),
+            "expected typed ActivePoolInvariantBroken, got: {err:?}"
+        );
     }
 }

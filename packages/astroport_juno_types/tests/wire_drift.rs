@@ -934,6 +934,99 @@ fn pair_reverse_simulation_response_bidir() {
     );
 }
 
+// rc4 polish: the three response types added by rc3's pair::QueryMsg
+// expansion (Config, CumulativePrices, Observe) match GPL byte-for-byte
+// today but were not locked down by Run 1's drift gate rewrite. Lock them
+// down now so a future refactor cannot silently drift the wire surface.
+
+#[test]
+fn pair_config_response_bidir() {
+    use cosmwasm_std::{to_json_binary, Addr};
+    let params = to_json_binary(&juno::pair::XYKPoolParams {
+        track_asset_balances: Some(true),
+        pool_unpause_at: Some(cosmwasm_std::Timestamp::from_seconds(1_750_000_000)),
+    })
+    .unwrap();
+    bidir_roundtrip(
+        juno::pair::ConfigResponse {
+            block_time_last: 1_750_001_234,
+            params: Some(params.clone()),
+            owner: Addr::unchecked("juno1owner"),
+            factory_addr: Addr::unchecked("juno1factory"),
+            tracker_addr: Some(Addr::unchecked("juno1tracker")),
+        },
+        astroport::pair::ConfigResponse {
+            block_time_last: 1_750_001_234,
+            params: Some(params),
+            owner: Addr::unchecked("juno1owner"),
+            factory_addr: Addr::unchecked("juno1factory"),
+            tracker_addr: Some(Addr::unchecked("juno1tracker")),
+        },
+    );
+}
+
+#[test]
+fn pair_cumulative_prices_response_bidir() {
+    let assets_juno = vec![
+        juno::asset::Asset {
+            info: juno::asset::AssetInfo::NativeToken { denom: "ujuno".to_string() },
+            amount: Uint128::new(1_000_000),
+        },
+        juno::asset::Asset {
+            info: juno::asset::AssetInfo::NativeToken { denom: "ibc/USDC".to_string() },
+            amount: Uint128::new(500_000),
+        },
+    ];
+    let assets_up = vec![
+        astroport::asset::Asset {
+            info: astroport::asset::AssetInfo::NativeToken { denom: "ujuno".to_string() },
+            amount: Uint128::new(1_000_000),
+        },
+        astroport::asset::Asset {
+            info: astroport::asset::AssetInfo::NativeToken { denom: "ibc/USDC".to_string() },
+            amount: Uint128::new(500_000),
+        },
+    ];
+    let prices_juno = vec![(
+        juno::asset::AssetInfo::NativeToken { denom: "ujuno".to_string() },
+        juno::asset::AssetInfo::NativeToken { denom: "ibc/USDC".to_string() },
+        Uint128::new(987_654_321),
+    )];
+    let prices_up = vec![(
+        astroport::asset::AssetInfo::NativeToken { denom: "ujuno".to_string() },
+        astroport::asset::AssetInfo::NativeToken { denom: "ibc/USDC".to_string() },
+        Uint128::new(987_654_321),
+    )];
+    bidir_roundtrip(
+        juno::pair::CumulativePricesResponse {
+            assets: assets_juno,
+            total_share: Uint128::new(700_000),
+            cumulative_prices: prices_juno,
+        },
+        astroport::pair::CumulativePricesResponse {
+            assets: assets_up,
+            total_share: Uint128::new(700_000),
+            cumulative_prices: prices_up,
+        },
+    );
+}
+
+#[test]
+fn pair_oracle_observation_bidir() {
+    use cosmwasm_std::Decimal;
+    use std::str::FromStr;
+    bidir_roundtrip(
+        juno::pair::OracleObservation {
+            timestamp: 1_750_000_500,
+            price: Decimal::from_str("1.234567890123456789").unwrap(),
+        },
+        astroport::observation::OracleObservation {
+            timestamp: 1_750_000_500,
+            price: Decimal::from_str("1.234567890123456789").unwrap(),
+        },
+    );
+}
+
 // ============================================================
 // router
 // ============================================================

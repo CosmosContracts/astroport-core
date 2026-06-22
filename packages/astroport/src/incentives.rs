@@ -2,6 +2,7 @@ use std::hash::{Hash, Hasher};
 use std::ops::RangeInclusive;
 
 use cosmwasm_schema::{cw_serde, QueryResponses};
+use cosmwasm_schema::serde::{de::Error as _, Deserialize as _, Deserializer};
 use cosmwasm_std::{Addr, Coin, Decimal256, Env, StdError, StdResult, Uint128};
 
 use crate::asset::{Asset, AssetInfo};
@@ -178,15 +179,19 @@ pub enum ExecuteMsg {
     UpdateConfig {
         /// Tristate update for the generator controller contract address.
         /// `Set(addr)` writes a new controller; `Unset` revokes the
-        /// existing one (clears the binding); `NoChange` (the default,
-        /// also produced when the field is omitted from JSON) leaves the
-        /// controller untouched. The controller — when set — is the only
-        /// address other than the owner allowed to call SetupPools, and
-        /// is the binding to the DAO DAO gauge adapter. An explicit
-        /// `Unset` path is required so the DAO can revoke a compromised
-        /// adapter without rotating ownership. See audit finding
-        /// "generator_controller unset path" (rc2).
-        #[serde(default)]
+        /// existing one (clears the binding); `NoChange` (the default)
+        /// leaves the controller untouched. Both JSON field-omission AND
+        /// an explicit JSON `null` decode to `NoChange` — the latter so
+        /// cwgen-style TS clients that emit `null` for unset fields
+        /// (rather than omitting the key) don't fail at the contract
+        /// boundary. The controller — when set — is the only address
+        /// other than the owner allowed to call SetupPools, and is the
+        /// binding to the DAO DAO gauge adapter. An explicit `Unset`
+        /// path is required so the DAO can revoke a compromised adapter
+        /// without rotating ownership. See audit findings
+        /// "generator_controller unset path" (rc2) +
+        /// "GeneratorControllerUpdate rejects explicit JSON null" (rc3 R2).
+        #[serde(default, deserialize_with = "deserialize_generator_controller_update")]
         generator_controller: GeneratorControllerUpdate,
         /// The new generator guardian
         guardian: Option<String>,
@@ -321,6 +326,24 @@ pub enum GeneratorControllerUpdate {
     /// identically to the pre-rc3 `Option<String>::None` semantics.
     #[default]
     NoChange,
+}
+
+/// Custom deserialize for the `generator_controller` field on
+/// `UpdateConfig::UpdateConfig` so explicit JSON `null` decodes to
+/// `GeneratorControllerUpdate::NoChange`. Cw_serde's default derive on a
+/// tagged enum rejects `null` (the `Option<String>` shape from rc2),
+/// which would force every cwgen-generated TS client to omit the field
+/// rather than emit `null`. This wrapper preserves backward compatibility
+/// for both wire shapes.
+fn deserialize_generator_controller_update<'de, D>(
+    deserializer: D,
+) -> Result<GeneratorControllerUpdate, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let opt = Option::<GeneratorControllerUpdate>::deserialize(deserializer)
+        .map_err(D::Error::custom)?;
+    Ok(opt.unwrap_or_default())
 }
 
 #[cw_serde]
@@ -540,5 +563,71 @@ mod tests {
             schedule.next_epoch_start_ts + 3 * EPOCH_LENGTH
         );
         assert_eq!(schedule.rps, Decimal256::one());
+    }
+
+    /// rc4 R2 polish: explicit JSON `null` on the `generator_controller`
+    /// field of `UpdateConfig` must decode to `GeneratorControllerUpdate::
+    /// NoChange`. This is the wire shape `Option<String>::None` would
+    /// serialize to under the rc2 enum, and the shape cwgen-style TS
+    /// clients commonly emit for unset fields. Without the custom
+    /// deserializer, serde-json-wasm rejects `null` on a tagged enum.
+    #[test]
+    fn update_config_decodes_explicit_null_generator_controller_as_no_change() {
+        let payload = r#"{"update_config":{"generator_controller":null,"guardian":null,"incentivization_fee_info":null,"token_transfer_gas_limit":null}}"#;
+        let decoded: ExecuteMsg = cosmwasm_std::from_json(payload).unwrap();
+        match decoded {
+            ExecuteMsg::UpdateConfig {
+                generator_controller,
+                ..
+            } => {
+                assert!(matches!(
+                    generator_controller,
+                    GeneratorControllerUpdate::NoChange
+                ));
+            }
+            _ => panic!("expected UpdateConfig"),
+        }
+    }
+
+    /// And: field omission still works (sanity check on the
+    /// `#[serde(default)]` half).
+    #[test]
+    fn update_config_decodes_omitted_generator_controller_as_no_change() {
+        let payload = r#"{"update_config":{"guardian":null,"incentivization_fee_info":null,"token_transfer_gas_limit":null}}"#;
+        let decoded: ExecuteMsg = cosmwasm_std::from_json(payload).unwrap();
+        match decoded {
+            ExecuteMsg::UpdateConfig {
+                generator_controller,
+                ..
+            } => {
+                assert!(matches!(
+                    generator_controller,
+                    GeneratorControllerUpdate::NoChange
+                ));
+            }
+            _ => panic!("expected UpdateConfig"),
+        }
+    }
+
+    /// And: existing tri-state variants still decode.
+    #[test]
+    fn update_config_decodes_set_unset_variants() {
+        let set_payload = r#"{"update_config":{"generator_controller":{"set":"juno1xxx"},"guardian":null,"incentivization_fee_info":null,"token_transfer_gas_limit":null}}"#;
+        let unset_payload = r#"{"update_config":{"generator_controller":"unset","guardian":null,"incentivization_fee_info":null,"token_transfer_gas_limit":null}}"#;
+
+        match cosmwasm_std::from_json(set_payload).unwrap() {
+            ExecuteMsg::UpdateConfig {
+                generator_controller: GeneratorControllerUpdate::Set(addr),
+                ..
+            } => assert_eq!(addr, "juno1xxx"),
+            other => panic!("expected Set, got {other:?}"),
+        }
+        match cosmwasm_std::from_json(unset_payload).unwrap() {
+            ExecuteMsg::UpdateConfig {
+                generator_controller: GeneratorControllerUpdate::Unset,
+                ..
+            } => {}
+            other => panic!("expected Unset, got {other:?}"),
+        }
     }
 }
