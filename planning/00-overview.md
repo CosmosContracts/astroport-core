@@ -26,8 +26,8 @@ This folder is contracts-only.
 | P3 — Integration tests | ✅ Complete (5 commits @ `0e225a15..87c256ec`; 4 new tests in `integration-tests/`) |
 | P2.5 — Incentives re-add + Juno strip | ✅ Complete (tagged `v0.1.2-juno-rc2` @ `15233816`; 6 commits; 4 new integration tests incl. cw20-reward AUDIT GATE; ADR D6) |
 | P2.5.9 — DAO DAO gauge adapter (dao-contracts side) | Pending — separate workstream on `feat/gauges` branch |
-| P4 — AI audit (3 diffs: A mechanical / B pool_unpause_at / C incentives) | 🟡 Run 1 + Run 2 complete; rc4 landed 2026-06-22 (tag `v0.1.4-juno-rc4` @ `d218c1af`). Run 1 surfaced 16 findings; rc3 closed 11/12 ≥-medium; Run 2 caught 1 HIGH partial (factory cross-check missing on native is_valid_pool) + 4 LOW polish items, all addressed in rc4. Run 3 (narrow R1+R3 re-audit on rc3→rc4 diff) pending to confirm closure before P5. See `memory/astroport-juno-ai-audit-findings.md` + `planning/07-audit-scope.md`. |
-| P5 — Deploy infra | Pending (blocked on P4 Run 3) |
+| P4 — AI audit (3 diffs: A mechanical / B pool_unpause_at / C incentives) | ✅ Complete (audit-of-record `v0.1.4-juno-rc4` @ `d218c1af`). Three-pass convergence 2026-06-22: Run 1 (rc2) 16 findings → Run 2 (rc3) 12 → Run 3 (rc4) 5; ≥-medium count 12 → 1 → 0. All Run 2 items closed; only 1 LOW + 4 INFO remain (polish, non-blocking). See `memory/astroport-juno-ai-audit-findings.md` + `planning/07-audit-scope.md`. |
+| P5 — Deploy infra | 🟢 Unblocked (P4 audit-of-record) |
 | P6 — uni-7 bakeoff | Pending |
 | P7 — juno-1 mainnet | Pending (DAO gate) |
 
