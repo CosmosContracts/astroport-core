@@ -1,0 +1,4730 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 1bb23198..720e1b77 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -139,6 +139,18 @@ dependencies = [
+  "thiserror",
+ ]
+ 
++[[package]]
++name = "astroport-juno-types"
++version = "0.1.0"
++dependencies = [
++ "astroport 5.13.1",
++ "cosmwasm-schema",
++ "cosmwasm-std",
++ "cw20 1.1.2",
++ "serde",
++ "serde_json",
++]
++
+ [[package]]
+ name = "astroport-native-coin-registry"
+ version = "1.1.0"
+diff --git a/Cargo.toml b/Cargo.toml
+index c8b20739..64bc504a 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -2,6 +2,7 @@
+ resolver = "2"
+ members = [
+     "packages/astroport",
++    "packages/astroport_juno_types",
+     "packages/astroport_test",
+     "packages/circular_buffer",
+     "contracts/factory",
+diff --git a/contracts/pair/src/contract.rs b/contracts/pair/src/contract.rs
+index 1e769d02..15a52e0a 100644
+--- a/contracts/pair/src/contract.rs
++++ b/contracts/pair/src/contract.rs
+@@ -66,10 +66,12 @@ pub fn instantiate(
+     }
+ 
+     let mut track_asset_balances = false;
++    let mut pool_unpause_at = None;
+ 
+     if let Some(init_params) = msg.init_params {
+         let params: XYKPoolParams = from_json(init_params)?;
+         track_asset_balances = params.track_asset_balances.unwrap_or_default();
++        pool_unpause_at = params.pool_unpause_at;
+     }
+ 
+     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
+@@ -88,6 +90,7 @@ pub fn instantiate(
+         track_asset_balances,
+         fee_share: None,
+         tracker_addr: None,
++        pool_unpause_at,
+     };
+ 
+     if track_asset_balances {
+@@ -627,6 +630,17 @@ pub fn swap(
+ 
+     let mut config = CONFIG.load(deps.storage)?;
+ 
++    // MEV-protection pause window. If the pair was instantiated with
++    // a future `pool_unpause_at`, reject swaps until that timestamp
++    // has elapsed. Liquidity provision/withdraw entry points are
++    // intentionally not gated — the seeder funds the pool before
++    // unpause. See planning/02-juno-patches.md.
++    if let Some(unpause_at) = config.pool_unpause_at {
++        if env.block.time < unpause_at {
++            return Err(ContractError::PoolPaused { unpause_at });
++        }
++    }
++
+     // If the asset balance is already increased, we should subtract the user deposit from the pool amount
+     let pools = config
+         .pair_info
+diff --git a/contracts/pair/src/error.rs b/contracts/pair/src/error.rs
+index c0b598c7..354e59ff 100644
+--- a/contracts/pair/src/error.rs
++++ b/contracts/pair/src/error.rs
+@@ -1,5 +1,5 @@
+ use astroport::{asset::MINIMUM_LIQUIDITY_AMOUNT, pair::MAX_FEE_SHARE_BPS};
+-use cosmwasm_std::{ConversionOverflowError, OverflowError, StdError, Uint128};
++use cosmwasm_std::{ConversionOverflowError, OverflowError, StdError, Timestamp, Uint128};
+ use cw_utils::{ParseReplyError, PaymentError};
+ use thiserror::Error;
+ 
+@@ -78,6 +78,9 @@ pub enum ContractError {
+         MAX_FEE_SHARE_BPS
+     )]
+     FeeShareOutOfBounds {},
++
++    #[error("Pool is paused until {unpause_at}")]
++    PoolPaused { unpause_at: Timestamp },
+ }
+ 
+ impl From<OverflowError> for ContractError {
+diff --git a/contracts/pair/src/state.rs b/contracts/pair/src/state.rs
+index f902b03e..56d5f198 100644
+--- a/contracts/pair/src/state.rs
++++ b/contracts/pair/src/state.rs
+@@ -3,7 +3,7 @@ use astroport::{
+     pair::FeeShareConfig,
+ };
+ use cosmwasm_schema::cw_serde;
+-use cosmwasm_std::{Addr, Uint128};
++use cosmwasm_std::{Addr, Timestamp, Uint128};
+ use cw_storage_plus::{Item, SnapshotMap};
+ 
+ /// This structure stores the main config parameters for a constant product pair contract.
+@@ -25,6 +25,12 @@ pub struct Config {
+     pub fee_share: Option<FeeShareConfig>,
+     /// Stores the tracker contract address
+     pub tracker_addr: Option<Addr>,
++    /// Optional MEV-protection pause window. While
++    /// `block.time < pool_unpause_at`, `Swap` is rejected with
++    /// `ContractError::PoolPaused`. LP entry points remain callable.
++    /// Set once at instantiate from `XYKPoolParams.pool_unpause_at`;
++    /// cannot be mutated.
++    pub pool_unpause_at: Option<Timestamp>,
+ }
+ 
+ /// Stores the config struct at the given key
+diff --git a/contracts/pair/src/testing.rs b/contracts/pair/src/testing.rs
+index 1cfcc52c..95c6b247 100644
+--- a/contracts/pair/src/testing.rs
++++ b/contracts/pair/src/testing.rs
+@@ -1468,6 +1468,7 @@ fn test_accumulate_prices() {
+                 track_asset_balances: false,
+                 fee_share: None,
+                 tracker_addr: None,
++                pool_unpause_at: None,
+             },
+             Uint128::new(case.x_amount),
+             Uint128::new(case.y_amount),
+diff --git a/contracts/pair/tests/integration.rs b/contracts/pair/tests/integration.rs
+index 2f0fc0df..615717d1 100644
+--- a/contracts/pair/tests/integration.rs
++++ b/contracts/pair/tests/integration.rs
+@@ -2,7 +2,7 @@
+ 
+ use cosmwasm_std::{
+     attr, coin, to_json_binary, Addr, Coin, Decimal, DepsMut, Empty, Env, MessageInfo, Response,
+-    StdResult, Uint128, Uint64,
++    StdResult, Timestamp, Uint128, Uint64,
+ };
+ use cw20::{BalanceResponse, Cw20Coin, Cw20ExecuteMsg, Cw20QueryMsg, MinterResponse};
+ 
+@@ -1044,6 +1044,7 @@ fn asset_balances_tracking_works_correctly() {
+         init_params: Some(
+             to_json_binary(&XYKPoolParams {
+                 track_asset_balances: Some(true),
++                pool_unpause_at: None,
+             })
+             .unwrap(),
+         ),
+@@ -1784,6 +1785,7 @@ fn test_fee_share(
+         init_params: Some(
+             to_json_binary(&XYKPoolParams {
+                 track_asset_balances: Some(true),
++                pool_unpause_at: None,
+             })
+             .unwrap(),
+         ),
+@@ -2118,6 +2120,7 @@ fn test_tracker_contract() {
+         init_params: Some(
+             to_json_binary(&XYKPoolParams {
+                 track_asset_balances: Some(true),
++                pool_unpause_at: None,
+             })
+             .unwrap(),
+         ),
+@@ -2336,3 +2339,276 @@ fn test_create_xyk_custom_type() {
+ 
+     assert_eq!(res.pair_type, PairType::Xyk {});
+ }
++
++// =====================================================================
++// pool_unpause_at — MEV-protection pause window
++//
++// See planning/02-juno-patches.md. The pair, when instantiated with
++// XYKPoolParams.pool_unpause_at = Some(future_ts), rejects Swap calls
++// until that timestamp has elapsed. ProvideLiquidity and
++// WithdrawLiquidity remain callable so the seeder can fund the pool
++// before the window expires.
++// =====================================================================
++
++/// Instantiate a pair whose swap gate stays closed until `unpause_at`.
++/// Mirrors `instantiate_pair` but threads `pool_unpause_at` through
++/// XYKPoolParams.
++fn instantiate_paused_pair(mut router: &mut TestApp, owner: &Addr, unpause_at: Timestamp) -> Addr {
++    let token_contract_code_id = store_token_code(&mut router);
++    let pair_contract_code_id = store_pair_code(&mut router);
++    let factory_code_id = store_factory_code(&mut router);
++
++    let init_msg = FactoryInstantiateMsg {
++        fee_address: None,
++        pair_configs: vec![PairConfig {
++            code_id: pair_contract_code_id,
++            maker_fee_bps: 0,
++            pair_type: PairType::Xyk {},
++            total_fee_bps: 0,
++            is_disabled: false,
++            is_generator_disabled: false,
++            permissioned: false,
++            whitelist: None,
++        }],
++        token_code_id: token_contract_code_id,
++        generator_address: Some(String::from("generator")),
++        owner: owner.to_string(),
++        whitelist_code_id: 234u64,
++        coin_registry_address: "coin_registry".to_string(),
++        tracker_config: None,
++    };
++
++    let factory_instance = router
++        .instantiate_contract(
++            factory_code_id,
++            owner.clone(),
++            &init_msg,
++            &[],
++            "FACTORY",
++            None,
++        )
++        .unwrap();
++
++    let init_params = to_json_binary(&XYKPoolParams {
++        track_asset_balances: None,
++        pool_unpause_at: Some(unpause_at),
++    })
++    .unwrap();
++
++    let msg = InstantiateMsg {
++        pair_type: PairType::Xyk {},
++        asset_infos: vec![
++            AssetInfo::NativeToken {
++                denom: "uusd".to_string(),
++            },
++            AssetInfo::NativeToken {
++                denom: "uluna".to_string(),
++            },
++        ],
++        token_code_id: token_contract_code_id,
++        factory_addr: factory_instance.to_string(),
++        init_params: Some(init_params),
++    };
++
++    router
++        .instantiate_contract(
++            pair_contract_code_id,
++            owner.clone(),
++            &msg,
++            &[],
++            String::from("PAIR"),
++            None,
++        )
++        .unwrap()
++}
++
++/// Provide liquidity to a paused pair from `owner`. Confirms the
++/// LP-side entry point is not gated by `pool_unpause_at`.
++fn seed_paused_pair(router: &mut TestApp, owner: &Addr, pair: &Addr) {
++    let (msg, coins) = provide_liquidity_msg(
++        Uint128::new(100_000_000_000),
++        Uint128::new(100_000_000_000),
++        None,
++        None,
++        None,
++    );
++    router
++        .execute_contract(owner.clone(), pair.clone(), &msg, &coins)
++        .expect("ProvideLiquidity must succeed during pause");
++}
++
++fn pause_test_app() -> TestApp {
++    mock_app(
++        Addr::unchecked(OWNER),
++        vec![
++            Coin {
++                denom: "uusd".to_string(),
++                amount: Uint128::new(1_000_000_000_000u128),
++            },
++            Coin {
++                denom: "uluna".to_string(),
++                amount: Uint128::new(1_000_000_000_000u128),
++            },
++        ],
++    )
++}
++
++#[test]
++fn swap_during_pause_rejects() {
++    let owner = Addr::unchecked(OWNER);
++    let mut app = pause_test_app();
++
++    let unpause_at = app.block_info().time.plus_seconds(60);
++    let pair = instantiate_paused_pair(&mut app, &owner, unpause_at);
++
++    // Liquidity provision must succeed during the pause window.
++    seed_paused_pair(&mut app, &owner, &pair);
++
++    // Swap before unpause_at must fail with PoolPaused.
++    let swap_msg = ExecuteMsg::Swap {
++        offer_asset: Asset {
++            info: AssetInfo::NativeToken {
++                denom: "uusd".to_owned(),
++            },
++            amount: Uint128::new(1_000_000),
++        },
++        ask_asset_info: None,
++        belief_price: None,
++        max_spread: None,
++        to: None,
++    };
++    let swap_funds = vec![Coin {
++        denom: "uusd".to_owned(),
++        amount: Uint128::new(1_000_000),
++    }];
++
++    let err = app
++        .execute_contract(owner.clone(), pair.clone(), &swap_msg, &swap_funds)
++        .unwrap_err();
++
++    assert_eq!(
++        err.downcast::<ContractError>().unwrap(),
++        ContractError::PoolPaused { unpause_at }
++    );
++}
++
++#[test]
++fn provide_and_withdraw_during_pause_succeeds() {
++    let owner = Addr::unchecked(OWNER);
++    let alice = Addr::unchecked("alice");
++    let mut app = pause_test_app();
++
++    // Seed Alice with funds for a second LP deposit + LP token transfer.
++    app.send_tokens(
++        owner.clone(),
++        alice.clone(),
++        &[coin(50_000_000_000, "uusd"), coin(50_000_000_000, "uluna")],
++    )
++    .unwrap();
++
++    let unpause_at = app.block_info().time.plus_seconds(120);
++    let pair = instantiate_paused_pair(&mut app, &owner, unpause_at);
++
++    // Owner provides liquidity first to mint the LP token denom.
++    seed_paused_pair(&mut app, &owner, &pair);
++
++    // Alice provides liquidity during the pause window — must succeed.
++    let (msg, coins) = provide_liquidity_msg(
++        Uint128::new(10_000_000_000),
++        Uint128::new(10_000_000_000),
++        None,
++        None,
++        None,
++    );
++    app.execute_contract(alice.clone(), pair.clone(), &msg, &coins)
++        .expect("ProvideLiquidity during pause must succeed");
++
++    // Owner withdraws a slice — must succeed during the pause window.
++    let pair_info: PairInfo = app
++        .wrap()
++        .query_wasm_smart(pair.clone(), &QueryMsg::Pair {})
++        .unwrap();
++    let lp_denom = pair_info.liquidity_token;
++    let lp_balance = app
++        .wrap()
++        .query_balance(owner.as_str(), &lp_denom)
++        .unwrap()
++        .amount;
++    assert!(lp_balance > Uint128::zero(), "owner should hold LP tokens");
++
++    let withdraw_msg = ExecuteMsg::WithdrawLiquidity {
++        assets: vec![],
++        min_assets_to_receive: None,
++    };
++    let withdraw_funds = vec![Coin {
++        denom: lp_denom.clone(),
++        amount: lp_balance / Uint128::new(10),
++    }];
++    app.execute_contract(owner.clone(), pair.clone(), &withdraw_msg, &withdraw_funds)
++        .expect("WithdrawLiquidity during pause must succeed");
++
++    // Block.time is still before unpause_at — confirm a swap still rejects.
++    let swap_msg = ExecuteMsg::Swap {
++        offer_asset: Asset {
++            info: AssetInfo::NativeToken {
++                denom: "uusd".to_owned(),
++            },
++            amount: Uint128::new(1_000_000),
++        },
++        ask_asset_info: None,
++        belief_price: None,
++        max_spread: None,
++        to: None,
++    };
++    let swap_funds = vec![Coin {
++        denom: "uusd".to_owned(),
++        amount: Uint128::new(1_000_000),
++    }];
++    let err = app
++        .execute_contract(owner.clone(), pair.clone(), &swap_msg, &swap_funds)
++        .unwrap_err();
++    assert_eq!(
++        err.downcast::<ContractError>().unwrap(),
++        ContractError::PoolPaused { unpause_at }
++    );
++}
++
++#[test]
++fn unpause_elapses_then_swap_works() {
++    let owner = Addr::unchecked(OWNER);
++    let mut app = pause_test_app();
++
++    let unpause_at = app.block_info().time.plus_seconds(60);
++    let pair = instantiate_paused_pair(&mut app, &owner, unpause_at);
++    seed_paused_pair(&mut app, &owner, &pair);
++
++    // Confirm swap is blocked at block.time < unpause_at.
++    let swap_msg = ExecuteMsg::Swap {
++        offer_asset: Asset {
++            info: AssetInfo::NativeToken {
++                denom: "uusd".to_owned(),
++            },
++            amount: Uint128::new(1_000_000),
++        },
++        ask_asset_info: None,
++        belief_price: None,
++        max_spread: None,
++        to: None,
++    };
++    let swap_funds = vec![Coin {
++        denom: "uusd".to_owned(),
++        amount: Uint128::new(1_000_000),
++    }];
++    app.execute_contract(owner.clone(), pair.clone(), &swap_msg, &swap_funds)
++        .unwrap_err();
++
++    // Advance block.time past the pause window.
++    app.update_block(|b| {
++        b.time = b.time.plus_seconds(61);
++        b.height += 1;
++    });
++
++    // Swap must now succeed.
++    app.execute_contract(owner.clone(), pair.clone(), &swap_msg, &swap_funds)
++        .expect("Swap after unpause_at must succeed");
++}
+diff --git a/packages/astroport/src/pair.rs b/packages/astroport/src/pair.rs
+index 2a036c92..4fe19743 100644
+--- a/packages/astroport/src/pair.rs
++++ b/packages/astroport/src/pair.rs
+@@ -231,6 +231,16 @@ pub struct XYKPoolParams {
+     /// They will not be tracked if the parameter is ignored.
+     /// It can not be disabled later once enabled.
+     pub track_asset_balances: Option<bool>,
++    /// Optional UTC timestamp; while `block.time < pool_unpause_at`,
++    /// the pair rejects `Swap` calls with `ContractError::PoolPaused`.
++    /// `ProvideLiquidity` and `WithdrawLiquidity` remain callable
++    /// during the pause window so the seeder can fund the pool.
++    /// `None` (the default and wire-default for older callers) means
++    /// no pause is enforced. Set by the cw-abc graduation flow per
++    /// `memory/abc-graduation-architecture-astroport.md`. Cannot be
++    /// changed after instantiation.
++    #[serde(default)]
++    pub pool_unpause_at: Option<cosmwasm_std::Timestamp>,
+ }
+ 
+ /// This structure stores a XYK pool's configuration.
+diff --git a/packages/astroport_juno_types/Cargo.toml b/packages/astroport_juno_types/Cargo.toml
+new file mode 100644
+index 00000000..0129bf82
+--- /dev/null
++++ b/packages/astroport_juno_types/Cargo.toml
+@@ -0,0 +1,26 @@
++[package]
++name = "astroport-juno-types"
++version = "0.1.0"
++authors = ["Juno Network <https://junonetwork.io>"]
++edition = "2021"
++description = "MIT-licensed wire-type mirror for astroport-juno (factory, pair, router, asset). Lets downstream CosmWasm contracts construct cross-contract calls into astroport-juno without inheriting GPL-3.0 via Rust linkage."
++license = "MIT"
++repository = "https://github.com/astroport-fi/astroport-core"
++homepage = "https://junonetwork.io"
++documentation = "https://docs.rs/astroport-juno-types"
++
++[lib]
++crate-type = ["rlib"]
++
++[dependencies]
++cosmwasm-schema.workspace = true
++cosmwasm-std.workspace = true
++cw20 = "1.1"
++
++[dev-dependencies]
++# Dev-dep only so the wire-drift test can assert that the shim's
++# serialized JSON deserializes 1:1 into the upstream GPL types.
++# The shipped library has no GPL linkage.
++astroport.workspace = true
++serde = "1.0"
++serde_json = "1.0"
+diff --git a/packages/astroport_juno_types/LICENSE-MIT b/packages/astroport_juno_types/LICENSE-MIT
+new file mode 100644
+index 00000000..0090df3a
+--- /dev/null
++++ b/packages/astroport_juno_types/LICENSE-MIT
+@@ -0,0 +1,21 @@
++MIT License
++
++Copyright (c) 2026 Juno Network contributors
++
++Permission is hereby granted, free of charge, to any person obtaining a copy
++of this software and associated documentation files (the "Software"), to deal
++in the Software without restriction, including without limitation the rights
++to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++copies of the Software, and to permit persons to whom the Software is
++furnished to do so, subject to the following conditions:
++
++The above copyright notice and this permission notice shall be included in all
++copies or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++SOFTWARE.
+diff --git a/packages/astroport_juno_types/examples/schema.rs b/packages/astroport_juno_types/examples/schema.rs
+new file mode 100644
+index 00000000..6f93ac3a
+--- /dev/null
++++ b/packages/astroport_juno_types/examples/schema.rs
+@@ -0,0 +1,69 @@
++//! Emit JSON Schemas for the shim's wire types under
++//! `packages/astroport_juno_types/schema/`. Useful for IDE tooling and
++//! human review.
++//!
++//! The drift gate that proves bit-identity vs the authoritative
++//! `packages/astroport` types is in `tests/wire_drift.rs` — a Rust
++//! round-trip test, not a schema diff.
++
++use cosmwasm_schema::{export_schema, remove_schemas, schema_for};
++use std::env::current_dir;
++use std::fs::create_dir_all;
++use std::path::PathBuf;
++
++fn emit_in(subdir: &str, exports: impl FnOnce(&PathBuf)) {
++    let mut out_dir = current_dir().unwrap();
++    out_dir.push("packages/astroport_juno_types/schema");
++    out_dir.push(subdir);
++    create_dir_all(&out_dir).unwrap();
++    remove_schemas(&out_dir).unwrap();
++    exports(&out_dir);
++}
++
++fn main() {
++    use astroport_juno_types::asset::{Asset, AssetInfo, PairInfo};
++    use astroport_juno_types::factory as f;
++    use astroport_juno_types::pair as p;
++    use astroport_juno_types::router as r;
++
++    emit_in("asset", |out_dir| {
++        export_schema(&schema_for!(Asset), out_dir);
++        export_schema(&schema_for!(AssetInfo), out_dir);
++        export_schema(&schema_for!(PairInfo), out_dir);
++    });
++
++    emit_in("factory", |out_dir| {
++        export_schema(&schema_for!(f::PairType), out_dir);
++        export_schema(&schema_for!(f::PairConfig), out_dir);
++        export_schema(&schema_for!(f::TrackerConfig), out_dir);
++        export_schema(&schema_for!(f::InstantiateMsg), out_dir);
++        export_schema(&schema_for!(f::ExecuteMsg), out_dir);
++        export_schema(&schema_for!(f::QueryMsg), out_dir);
++        export_schema(&schema_for!(f::ConfigResponse), out_dir);
++        export_schema(&schema_for!(f::PairsResponse), out_dir);
++        export_schema(&schema_for!(f::FeeInfoResponse), out_dir);
++    });
++
++    emit_in("pair", |out_dir| {
++        export_schema(&schema_for!(p::XYKPoolParams), out_dir);
++        export_schema(&schema_for!(p::FeeShareConfig), out_dir);
++        export_schema(&schema_for!(p::InstantiateMsg), out_dir);
++        export_schema(&schema_for!(p::ExecuteMsg), out_dir);
++        export_schema(&schema_for!(p::Cw20HookMsg), out_dir);
++        export_schema(&schema_for!(p::QueryMsg), out_dir);
++        export_schema(&schema_for!(p::PoolResponse), out_dir);
++        export_schema(&schema_for!(p::SimulationResponse), out_dir);
++        export_schema(&schema_for!(p::ReverseSimulationResponse), out_dir);
++    });
++
++    emit_in("router", |out_dir| {
++        export_schema(&schema_for!(r::InstantiateMsg), out_dir);
++        export_schema(&schema_for!(r::ExecuteMsg), out_dir);
++        export_schema(&schema_for!(r::Cw20HookMsg), out_dir);
++        export_schema(&schema_for!(r::QueryMsg), out_dir);
++        export_schema(&schema_for!(r::SwapOperation), out_dir);
++        export_schema(&schema_for!(r::SwapResponseData), out_dir);
++        export_schema(&schema_for!(r::SimulateSwapOperationsResponse), out_dir);
++        export_schema(&schema_for!(r::ConfigResponse), out_dir);
++    });
++}
+diff --git a/packages/astroport_juno_types/schema/asset/asset.json b/packages/astroport_juno_types/schema/asset/asset.json
+new file mode 100644
+index 00000000..f004d30a
+--- /dev/null
++++ b/packages/astroport_juno_types/schema/asset/asset.json
+@@ -0,0 +1,78 @@
++{
++  "$schema": "http://json-schema.org/draft-07/schema#",
++  "title": "Asset",
++  "description": "An asset (native coin or cw20 token) plus an amount.",
++  "type": "object",
++  "required": [
++    "amount",
++    "info"
++  ],
++  "properties": {
++    "amount": {
++      "$ref": "#/definitions/Uint128"
++    },
++    "info": {
++      "$ref": "#/definitions/AssetInfo"
++    }
++  },
++  "additionalProperties": false,
++  "definitions": {
++    "Addr": {
++      "description": "A human readable address.\n\nIn Cosmos, this is typically bech32 encoded. But for multi-chain smart contracts no assumptions should be made other than being UTF-8 encoded and of reasonable length.\n\nThis type represents a validated address. It can be created in the following ways 1. Use `Addr::unchecked(input)` 2. Use `let checked: Addr = deps.api.addr_validate(input)?` 3. Use `let checked: Addr = deps.api.addr_humanize(canonical_addr)?` 4. Deserialize from JSON. This must only be done from JSON that was validated before such as a contract's state. `Addr` must not be used in messages sent by the user because this would result in unvalidated instances.\n\nThis type is immutable. If you really need to mutate it (Really? Are you sure?), create a mutable copy using `let mut mutable = Addr::to_string()` and operate on that `String` instance.",
++      "type": "string"
++    },
++    "AssetInfo": {
++      "description": "Discriminates between a native (bank-module) coin and a cw20 token.",
++      "oneOf": [
++        {
++          "description": "Non-native (cw20) token by contract address.",
++          "type": "object",
++          "required": [
++            "token"
++          ],
++          "properties": {
++            "token": {
++              "type": "object",
++              "required": [
++                "contract_addr"
++              ],
++              "properties": {
++                "contract_addr": {
++                  "$ref": "#/definitions/Addr"
++                }
++              },
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        },
++        {
++          "description": "Native (bank) token by denom string.",
++          "type": "object",
++          "required": [
++            "native_token"
++          ],
++          "properties": {
++            "native_token": {
++              "type": "object",
++              "required": [
++                "denom"
++              ],
++              "properties": {
++                "denom": {
++                  "type": "string"
++                }
++              },
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        }
++      ]
++    },
++    "Uint128": {
++      "description": "A thin wrapper around u128 that is using strings for JSON encoding/decoding, such that the full u128 range can be used for clients that convert JSON numbers to floats, like JavaScript and jq.\n\n# Examples\n\nUse `from` to create instances of this and `u128` to get the value out:\n\n``` # use cosmwasm_std::Uint128; let a = Uint128::from(123u128); assert_eq!(a.u128(), 123);\n\nlet b = Uint128::from(42u64); assert_eq!(b.u128(), 42);\n\nlet c = Uint128::from(70u32); assert_eq!(c.u128(), 70); ```",
++      "type": "string"
++    }
++  }
++}
+diff --git a/packages/astroport_juno_types/schema/asset/asset_info.json b/packages/astroport_juno_types/schema/asset/asset_info.json
+new file mode 100644
+index 00000000..caf22443
+--- /dev/null
++++ b/packages/astroport_juno_types/schema/asset/asset_info.json
+@@ -0,0 +1,57 @@
++{
++  "$schema": "http://json-schema.org/draft-07/schema#",
++  "title": "AssetInfo",
++  "description": "Discriminates between a native (bank-module) coin and a cw20 token.",
++  "oneOf": [
++    {
++      "description": "Non-native (cw20) token by contract address.",
++      "type": "object",
++      "required": [
++        "token"
++      ],
++      "properties": {
++        "token": {
++          "type": "object",
++          "required": [
++            "contract_addr"
++          ],
++          "properties": {
++            "contract_addr": {
++              "$ref": "#/definitions/Addr"
++            }
++          },
++          "additionalProperties": false
++        }
++      },
++      "additionalProperties": false
++    },
++    {
++      "description": "Native (bank) token by denom string.",
++      "type": "object",
++      "required": [
++        "native_token"
++      ],
++      "properties": {
++        "native_token": {
++          "type": "object",
++          "required": [
++            "denom"
++          ],
++          "properties": {
++            "denom": {
++              "type": "string"
++            }
++          },
++          "additionalProperties": false
++        }
++      },
++      "additionalProperties": false
++    }
++  ],
++  "definitions": {
++    "Addr": {
++      "description": "A human readable address.\n\nIn Cosmos, this is typically bech32 encoded. But for multi-chain smart contracts no assumptions should be made other than being UTF-8 encoded and of reasonable length.\n\nThis type represents a validated address. It can be created in the following ways 1. Use `Addr::unchecked(input)` 2. Use `let checked: Addr = deps.api.addr_validate(input)?` 3. Use `let checked: Addr = deps.api.addr_humanize(canonical_addr)?` 4. Deserialize from JSON. This must only be done from JSON that was validated before such as a contract's state. `Addr` must not be used in messages sent by the user because this would result in unvalidated instances.\n\nThis type is immutable. If you really need to mutate it (Really? Are you sure?), create a mutable copy using `let mut mutable = Addr::to_string()` and operate on that `String` instance.",
++      "type": "string"
++    }
++  }
++}
+diff --git a/packages/astroport_juno_types/schema/asset/pair_info.json b/packages/astroport_juno_types/schema/asset/pair_info.json
+new file mode 100644
+index 00000000..3f6017a6
+--- /dev/null
++++ b/packages/astroport_juno_types/schema/asset/pair_info.json
+@@ -0,0 +1,128 @@
++{
++  "$schema": "http://json-schema.org/draft-07/schema#",
++  "title": "PairInfo",
++  "description": "The factory's PairInfo response shape.",
++  "type": "object",
++  "required": [
++    "asset_infos",
++    "contract_addr",
++    "liquidity_token",
++    "pair_type"
++  ],
++  "properties": {
++    "asset_infos": {
++      "type": "array",
++      "items": {
++        "$ref": "#/definitions/AssetInfo"
++      }
++    },
++    "contract_addr": {
++      "$ref": "#/definitions/Addr"
++    },
++    "liquidity_token": {
++      "type": "string"
++    },
++    "pair_type": {
++      "$ref": "#/definitions/PairType"
++    }
++  },
++  "additionalProperties": false,
++  "definitions": {
++    "Addr": {
++      "description": "A human readable address.\n\nIn Cosmos, this is typically bech32 encoded. But for multi-chain smart contracts no assumptions should be made other than being UTF-8 encoded and of reasonable length.\n\nThis type represents a validated address. It can be created in the following ways 1. Use `Addr::unchecked(input)` 2. Use `let checked: Addr = deps.api.addr_validate(input)?` 3. Use `let checked: Addr = deps.api.addr_humanize(canonical_addr)?` 4. Deserialize from JSON. This must only be done from JSON that was validated before such as a contract's state. `Addr` must not be used in messages sent by the user because this would result in unvalidated instances.\n\nThis type is immutable. If you really need to mutate it (Really? Are you sure?), create a mutable copy using `let mut mutable = Addr::to_string()` and operate on that `String` instance.",
++      "type": "string"
++    },
++    "AssetInfo": {
++      "description": "Discriminates between a native (bank-module) coin and a cw20 token.",
++      "oneOf": [
++        {
++          "description": "Non-native (cw20) token by contract address.",
++          "type": "object",
++          "required": [
++            "token"
++          ],
++          "properties": {
++            "token": {
++              "type": "object",
++              "required": [
++                "contract_addr"
++              ],
++              "properties": {
++                "contract_addr": {
++                  "$ref": "#/definitions/Addr"
++                }
++              },
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        },
++        {
++          "description": "Native (bank) token by denom string.",
++          "type": "object",
++          "required": [
++            "native_token"
++          ],
++          "properties": {
++            "native_token": {
++              "type": "object",
++              "required": [
++                "denom"
++              ],
++              "properties": {
++                "denom": {
++                  "type": "string"
++                }
++              },
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        }
++      ]
++    },
++    "PairType": {
++      "description": "Available pair types in the factory's registry.",
++      "oneOf": [
++        {
++          "type": "object",
++          "required": [
++            "xyk"
++          ],
++          "properties": {
++            "xyk": {
++              "type": "object",
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        },
++        {
++          "type": "object",
++          "required": [
++            "stable"
++          ],
++          "properties": {
++            "stable": {
++              "type": "object",
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        },
++        {
++          "type": "object",
++          "required": [
++            "custom"
++          ],
++          "properties": {
++            "custom": {
++              "type": "string"
++            }
++          },
++          "additionalProperties": false
++        }
++      ]
++    }
++  }
++}
+diff --git a/packages/astroport_juno_types/schema/factory/config_response.json b/packages/astroport_juno_types/schema/factory/config_response.json
+new file mode 100644
+index 00000000..98491229
+--- /dev/null
++++ b/packages/astroport_juno_types/schema/factory/config_response.json
+@@ -0,0 +1,159 @@
++{
++  "$schema": "http://json-schema.org/draft-07/schema#",
++  "title": "ConfigResponse",
++  "type": "object",
++  "required": [
++    "coin_registry_address",
++    "owner",
++    "pair_configs",
++    "token_code_id",
++    "whitelist_code_id"
++  ],
++  "properties": {
++    "coin_registry_address": {
++      "$ref": "#/definitions/Addr"
++    },
++    "fee_address": {
++      "anyOf": [
++        {
++          "$ref": "#/definitions/Addr"
++        },
++        {
++          "type": "null"
++        }
++      ]
++    },
++    "generator_address": {
++      "anyOf": [
++        {
++          "$ref": "#/definitions/Addr"
++        },
++        {
++          "type": "null"
++        }
++      ]
++    },
++    "owner": {
++      "$ref": "#/definitions/Addr"
++    },
++    "pair_configs": {
++      "type": "array",
++      "items": {
++        "$ref": "#/definitions/PairConfig"
++      }
++    },
++    "token_code_id": {
++      "type": "integer",
++      "format": "uint64",
++      "minimum": 0.0
++    },
++    "whitelist_code_id": {
++      "type": "integer",
++      "format": "uint64",
++      "minimum": 0.0
++    }
++  },
++  "additionalProperties": false,
++  "definitions": {
++    "Addr": {
++      "description": "A human readable address.\n\nIn Cosmos, this is typically bech32 encoded. But for multi-chain smart contracts no assumptions should be made other than being UTF-8 encoded and of reasonable length.\n\nThis type represents a validated address. It can be created in the following ways 1. Use `Addr::unchecked(input)` 2. Use `let checked: Addr = deps.api.addr_validate(input)?` 3. Use `let checked: Addr = deps.api.addr_humanize(canonical_addr)?` 4. Deserialize from JSON. This must only be done from JSON that was validated before such as a contract's state. `Addr` must not be used in messages sent by the user because this would result in unvalidated instances.\n\nThis type is immutable. If you really need to mutate it (Really? Are you sure?), create a mutable copy using `let mut mutable = Addr::to_string()` and operate on that `String` instance.",
++      "type": "string"
++    },
++    "PairConfig": {
++      "description": "A pair-type configuration entry registered in the factory.",
++      "type": "object",
++      "required": [
++        "code_id",
++        "maker_fee_bps",
++        "pair_type",
++        "total_fee_bps"
++      ],
++      "properties": {
++        "code_id": {
++          "type": "integer",
++          "format": "uint64",
++          "minimum": 0.0
++        },
++        "is_disabled": {
++          "default": false,
++          "type": "boolean"
++        },
++        "is_generator_disabled": {
++          "default": false,
++          "type": "boolean"
++        },
++        "maker_fee_bps": {
++          "type": "integer",
++          "format": "uint16",
++          "minimum": 0.0
++        },
++        "pair_type": {
++          "$ref": "#/definitions/PairType"
++        },
++        "permissioned": {
++          "default": false,
++          "type": "boolean"
++        },
++        "total_fee_bps": {
++          "type": "integer",
++          "format": "uint16",
++          "minimum": 0.0
++        },
++        "whitelist": {
++          "default": null,
++          "type": [
++            "array",
++            "null"
++          ],
++          "items": {
++            "type": "string"
++          }
++        }
++      },
++      "additionalProperties": false
++    },
++    "PairType": {
++      "description": "Available pair types in the factory's registry.",
++      "oneOf": [
++        {
++          "type": "object",
++          "required": [
++            "xyk"
++          ],
++          "properties": {
++            "xyk": {
++              "type": "object",
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        },
++        {
++          "type": "object",
++          "required": [
++            "stable"
++          ],
++          "properties": {
++            "stable": {
++              "type": "object",
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        },
++        {
++          "type": "object",
++          "required": [
++            "custom"
++          ],
++          "properties": {
++            "custom": {
++              "type": "string"
++            }
++          },
++          "additionalProperties": false
++        }
++      ]
++    }
++  }
++}
+diff --git a/packages/astroport_juno_types/schema/factory/execute_msg.json b/packages/astroport_juno_types/schema/factory/execute_msg.json
+new file mode 100644
+index 00000000..6a77bd98
+--- /dev/null
++++ b/packages/astroport_juno_types/schema/factory/execute_msg.json
+@@ -0,0 +1,148 @@
++{
++  "$schema": "http://json-schema.org/draft-07/schema#",
++  "title": "ExecuteMsg",
++  "description": "The factory execute message surface downstream consumers need. This crate intentionally exposes only the cross-contract-callable variants — admin-side mutations (UpdateConfig, etc.) are not mirrored.",
++  "oneOf": [
++    {
++      "description": "Create a new pair of `pair_type` over the two `asset_infos`. Pair init params are passed verbatim through to the pair contract's `InstantiateMsg.init_params`.",
++      "type": "object",
++      "required": [
++        "create_pair"
++      ],
++      "properties": {
++        "create_pair": {
++          "type": "object",
++          "required": [
++            "asset_infos",
++            "pair_type"
++          ],
++          "properties": {
++            "asset_infos": {
++              "type": "array",
++              "items": {
++                "$ref": "#/definitions/AssetInfo"
++              }
++            },
++            "init_params": {
++              "anyOf": [
++                {
++                  "$ref": "#/definitions/Binary"
++                },
++                {
++                  "type": "null"
++                }
++              ]
++            },
++            "pair_type": {
++              "$ref": "#/definitions/PairType"
++            }
++          },
++          "additionalProperties": false
++        }
++      },
++      "additionalProperties": false
++    }
++  ],
++  "definitions": {
++    "Addr": {
++      "description": "A human readable address.\n\nIn Cosmos, this is typically bech32 encoded. But for multi-chain smart contracts no assumptions should be made other than being UTF-8 encoded and of reasonable length.\n\nThis type represents a validated address. It can be created in the following ways 1. Use `Addr::unchecked(input)` 2. Use `let checked: Addr = deps.api.addr_validate(input)?` 3. Use `let checked: Addr = deps.api.addr_humanize(canonical_addr)?` 4. Deserialize from JSON. This must only be done from JSON that was validated before such as a contract's state. `Addr` must not be used in messages sent by the user because this would result in unvalidated instances.\n\nThis type is immutable. If you really need to mutate it (Really? Are you sure?), create a mutable copy using `let mut mutable = Addr::to_string()` and operate on that `String` instance.",
++      "type": "string"
++    },
++    "AssetInfo": {
++      "description": "Discriminates between a native (bank-module) coin and a cw20 token.",
++      "oneOf": [
++        {
++          "description": "Non-native (cw20) token by contract address.",
++          "type": "object",
++          "required": [
++            "token"
++          ],
++          "properties": {
++            "token": {
++              "type": "object",
++              "required": [
++                "contract_addr"
++              ],
++              "properties": {
++                "contract_addr": {
++                  "$ref": "#/definitions/Addr"
++                }
++              },
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        },
++        {
++          "description": "Native (bank) token by denom string.",
++          "type": "object",
++          "required": [
++            "native_token"
++          ],
++          "properties": {
++            "native_token": {
++              "type": "object",
++              "required": [
++                "denom"
++              ],
++              "properties": {
++                "denom": {
++                  "type": "string"
++                }
++              },
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        }
++      ]
++    },
++    "Binary": {
++      "description": "Binary is a wrapper around Vec<u8> to add base64 de/serialization with serde. It also adds some helper methods to help encode inline.\n\nThis is only needed as serde-json-{core,wasm} has a horrible encoding for Vec<u8>. See also <https://github.com/CosmWasm/cosmwasm/blob/main/docs/MESSAGE_TYPES.md>.",
++      "type": "string"
++    },
++    "PairType": {
++      "description": "Available pair types in the factory's registry.",
++      "oneOf": [
++        {
++          "type": "object",
++          "required": [
++            "xyk"
++          ],
++          "properties": {
++            "xyk": {
++              "type": "object",
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        },
++        {
++          "type": "object",
++          "required": [
++            "stable"
++          ],
++          "properties": {
++            "stable": {
++              "type": "object",
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        },
++        {
++          "type": "object",
++          "required": [
++            "custom"
++          ],
++          "properties": {
++            "custom": {
++              "type": "string"
++            }
++          },
++          "additionalProperties": false
++        }
++      ]
++    }
++  }
++}
+diff --git a/packages/astroport_juno_types/schema/factory/fee_info_response.json b/packages/astroport_juno_types/schema/factory/fee_info_response.json
+new file mode 100644
+index 00000000..068b4b81
+--- /dev/null
++++ b/packages/astroport_juno_types/schema/factory/fee_info_response.json
+@@ -0,0 +1,38 @@
++{
++  "$schema": "http://json-schema.org/draft-07/schema#",
++  "title": "FeeInfoResponse",
++  "type": "object",
++  "required": [
++    "maker_fee_bps",
++    "total_fee_bps"
++  ],
++  "properties": {
++    "fee_address": {
++      "anyOf": [
++        {
++          "$ref": "#/definitions/Addr"
++        },
++        {
++          "type": "null"
++        }
++      ]
++    },
++    "maker_fee_bps": {
++      "type": "integer",
++      "format": "uint16",
++      "minimum": 0.0
++    },
++    "total_fee_bps": {
++      "type": "integer",
++      "format": "uint16",
++      "minimum": 0.0
++    }
++  },
++  "additionalProperties": false,
++  "definitions": {
++    "Addr": {
++      "description": "A human readable address.\n\nIn Cosmos, this is typically bech32 encoded. But for multi-chain smart contracts no assumptions should be made other than being UTF-8 encoded and of reasonable length.\n\nThis type represents a validated address. It can be created in the following ways 1. Use `Addr::unchecked(input)` 2. Use `let checked: Addr = deps.api.addr_validate(input)?` 3. Use `let checked: Addr = deps.api.addr_humanize(canonical_addr)?` 4. Deserialize from JSON. This must only be done from JSON that was validated before such as a contract's state. `Addr` must not be used in messages sent by the user because this would result in unvalidated instances.\n\nThis type is immutable. If you really need to mutate it (Really? Are you sure?), create a mutable copy using `let mut mutable = Addr::to_string()` and operate on that `String` instance.",
++      "type": "string"
++    }
++  }
++}
+diff --git a/packages/astroport_juno_types/schema/factory/instantiate_msg.json b/packages/astroport_juno_types/schema/factory/instantiate_msg.json
+new file mode 100644
+index 00000000..45d55333
+--- /dev/null
++++ b/packages/astroport_juno_types/schema/factory/instantiate_msg.json
+@@ -0,0 +1,177 @@
++{
++  "$schema": "http://json-schema.org/draft-07/schema#",
++  "title": "InstantiateMsg",
++  "description": "Factory instantiate parameters.",
++  "type": "object",
++  "required": [
++    "coin_registry_address",
++    "owner",
++    "pair_configs",
++    "token_code_id",
++    "whitelist_code_id"
++  ],
++  "properties": {
++    "coin_registry_address": {
++      "type": "string"
++    },
++    "fee_address": {
++      "type": [
++        "string",
++        "null"
++      ]
++    },
++    "generator_address": {
++      "type": [
++        "string",
++        "null"
++      ]
++    },
++    "owner": {
++      "type": "string"
++    },
++    "pair_configs": {
++      "type": "array",
++      "items": {
++        "$ref": "#/definitions/PairConfig"
++      }
++    },
++    "token_code_id": {
++      "type": "integer",
++      "format": "uint64",
++      "minimum": 0.0
++    },
++    "tracker_config": {
++      "anyOf": [
++        {
++          "$ref": "#/definitions/TrackerConfig"
++        },
++        {
++          "type": "null"
++        }
++      ]
++    },
++    "whitelist_code_id": {
++      "type": "integer",
++      "format": "uint64",
++      "minimum": 0.0
++    }
++  },
++  "additionalProperties": false,
++  "definitions": {
++    "PairConfig": {
++      "description": "A pair-type configuration entry registered in the factory.",
++      "type": "object",
++      "required": [
++        "code_id",
++        "maker_fee_bps",
++        "pair_type",
++        "total_fee_bps"
++      ],
++      "properties": {
++        "code_id": {
++          "type": "integer",
++          "format": "uint64",
++          "minimum": 0.0
++        },
++        "is_disabled": {
++          "default": false,
++          "type": "boolean"
++        },
++        "is_generator_disabled": {
++          "default": false,
++          "type": "boolean"
++        },
++        "maker_fee_bps": {
++          "type": "integer",
++          "format": "uint16",
++          "minimum": 0.0
++        },
++        "pair_type": {
++          "$ref": "#/definitions/PairType"
++        },
++        "permissioned": {
++          "default": false,
++          "type": "boolean"
++        },
++        "total_fee_bps": {
++          "type": "integer",
++          "format": "uint16",
++          "minimum": 0.0
++        },
++        "whitelist": {
++          "default": null,
++          "type": [
++            "array",
++            "null"
++          ],
++          "items": {
++            "type": "string"
++          }
++        }
++      },
++      "additionalProperties": false
++    },
++    "PairType": {
++      "description": "Available pair types in the factory's registry.",
++      "oneOf": [
++        {
++          "type": "object",
++          "required": [
++            "xyk"
++          ],
++          "properties": {
++            "xyk": {
++              "type": "object",
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        },
++        {
++          "type": "object",
++          "required": [
++            "stable"
++          ],
++          "properties": {
++            "stable": {
++              "type": "object",
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        },
++        {
++          "type": "object",
++          "required": [
++            "custom"
++          ],
++          "properties": {
++            "custom": {
++              "type": "string"
++            }
++          },
++          "additionalProperties": false
++        }
++      ]
++    },
++    "TrackerConfig": {
++      "description": "Tokenfactory tracker hook configuration. None ⇒ no tracker.",
++      "type": "object",
++      "required": [
++        "code_id",
++        "token_factory_addr"
++      ],
++      "properties": {
++        "code_id": {
++          "type": "integer",
++          "format": "uint64",
++          "minimum": 0.0
++        },
++        "token_factory_addr": {
++          "type": "string"
++        }
++      },
++      "additionalProperties": false
++    }
++  }
++}
+diff --git a/packages/astroport_juno_types/schema/factory/pair_config.json b/packages/astroport_juno_types/schema/factory/pair_config.json
+new file mode 100644
+index 00000000..d7b2c7c2
+--- /dev/null
++++ b/packages/astroport_juno_types/schema/factory/pair_config.json
+@@ -0,0 +1,100 @@
++{
++  "$schema": "http://json-schema.org/draft-07/schema#",
++  "title": "PairConfig",
++  "description": "A pair-type configuration entry registered in the factory.",
++  "type": "object",
++  "required": [
++    "code_id",
++    "maker_fee_bps",
++    "pair_type",
++    "total_fee_bps"
++  ],
++  "properties": {
++    "code_id": {
++      "type": "integer",
++      "format": "uint64",
++      "minimum": 0.0
++    },
++    "is_disabled": {
++      "default": false,
++      "type": "boolean"
++    },
++    "is_generator_disabled": {
++      "default": false,
++      "type": "boolean"
++    },
++    "maker_fee_bps": {
++      "type": "integer",
++      "format": "uint16",
++      "minimum": 0.0
++    },
++    "pair_type": {
++      "$ref": "#/definitions/PairType"
++    },
++    "permissioned": {
++      "default": false,
++      "type": "boolean"
++    },
++    "total_fee_bps": {
++      "type": "integer",
++      "format": "uint16",
++      "minimum": 0.0
++    },
++    "whitelist": {
++      "default": null,
++      "type": [
++        "array",
++        "null"
++      ],
++      "items": {
++        "type": "string"
++      }
++    }
++  },
++  "additionalProperties": false,
++  "definitions": {
++    "PairType": {
++      "description": "Available pair types in the factory's registry.",
++      "oneOf": [
++        {
++          "type": "object",
++          "required": [
++            "xyk"
++          ],
++          "properties": {
++            "xyk": {
++              "type": "object",
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        },
++        {
++          "type": "object",
++          "required": [
++            "stable"
++          ],
++          "properties": {
++            "stable": {
++              "type": "object",
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        },
++        {
++          "type": "object",
++          "required": [
++            "custom"
++          ],
++          "properties": {
++            "custom": {
++              "type": "string"
++            }
++          },
++          "additionalProperties": false
++        }
++      ]
++    }
++  }
++}
+diff --git a/packages/astroport_juno_types/schema/factory/pair_type.json b/packages/astroport_juno_types/schema/factory/pair_type.json
+new file mode 100644
+index 00000000..d4c4ff70
+--- /dev/null
++++ b/packages/astroport_juno_types/schema/factory/pair_type.json
+@@ -0,0 +1,45 @@
++{
++  "$schema": "http://json-schema.org/draft-07/schema#",
++  "title": "PairType",
++  "description": "Available pair types in the factory's registry.",
++  "oneOf": [
++    {
++      "type": "object",
++      "required": [
++        "xyk"
++      ],
++      "properties": {
++        "xyk": {
++          "type": "object",
++          "additionalProperties": false
++        }
++      },
++      "additionalProperties": false
++    },
++    {
++      "type": "object",
++      "required": [
++        "stable"
++      ],
++      "properties": {
++        "stable": {
++          "type": "object",
++          "additionalProperties": false
++        }
++      },
++      "additionalProperties": false
++    },
++    {
++      "type": "object",
++      "required": [
++        "custom"
++      ],
++      "properties": {
++        "custom": {
++          "type": "string"
++        }
++      },
++      "additionalProperties": false
++    }
++  ]
++}
+diff --git a/packages/astroport_juno_types/schema/factory/pairs_response.json b/packages/astroport_juno_types/schema/factory/pairs_response.json
+new file mode 100644
+index 00000000..39dded06
+--- /dev/null
++++ b/packages/astroport_juno_types/schema/factory/pairs_response.json
+@@ -0,0 +1,143 @@
++{
++  "$schema": "http://json-schema.org/draft-07/schema#",
++  "title": "PairsResponse",
++  "type": "object",
++  "required": [
++    "pairs"
++  ],
++  "properties": {
++    "pairs": {
++      "type": "array",
++      "items": {
++        "$ref": "#/definitions/PairInfo"
++      }
++    }
++  },
++  "additionalProperties": false,
++  "definitions": {
++    "Addr": {
++      "description": "A human readable address.\n\nIn Cosmos, this is typically bech32 encoded. But for multi-chain smart contracts no assumptions should be made other than being UTF-8 encoded and of reasonable length.\n\nThis type represents a validated address. It can be created in the following ways 1. Use `Addr::unchecked(input)` 2. Use `let checked: Addr = deps.api.addr_validate(input)?` 3. Use `let checked: Addr = deps.api.addr_humanize(canonical_addr)?` 4. Deserialize from JSON. This must only be done from JSON that was validated before such as a contract's state. `Addr` must not be used in messages sent by the user because this would result in unvalidated instances.\n\nThis type is immutable. If you really need to mutate it (Really? Are you sure?), create a mutable copy using `let mut mutable = Addr::to_string()` and operate on that `String` instance.",
++      "type": "string"
++    },
++    "AssetInfo": {
++      "description": "Discriminates between a native (bank-module) coin and a cw20 token.",
++      "oneOf": [
++        {
++          "description": "Non-native (cw20) token by contract address.",
++          "type": "object",
++          "required": [
++            "token"
++          ],
++          "properties": {
++            "token": {
++              "type": "object",
++              "required": [
++                "contract_addr"
++              ],
++              "properties": {
++                "contract_addr": {
++                  "$ref": "#/definitions/Addr"
++                }
++              },
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        },
++        {
++          "description": "Native (bank) token by denom string.",
++          "type": "object",
++          "required": [
++            "native_token"
++          ],
++          "properties": {
++            "native_token": {
++              "type": "object",
++              "required": [
++                "denom"
++              ],
++              "properties": {
++                "denom": {
++                  "type": "string"
++                }
++              },
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        }
++      ]
++    },
++    "PairInfo": {
++      "description": "The factory's PairInfo response shape.",
++      "type": "object",
++      "required": [
++        "asset_infos",
++        "contract_addr",
++        "liquidity_token",
++        "pair_type"
++      ],
++      "properties": {
++        "asset_infos": {
++          "type": "array",
++          "items": {
++            "$ref": "#/definitions/AssetInfo"
++          }
++        },
++        "contract_addr": {
++          "$ref": "#/definitions/Addr"
++        },
++        "liquidity_token": {
++          "type": "string"
++        },
++        "pair_type": {
++          "$ref": "#/definitions/PairType"
++        }
++      },
++      "additionalProperties": false
++    },
++    "PairType": {
++      "description": "Available pair types in the factory's registry.",
++      "oneOf": [
++        {
++          "type": "object",
++          "required": [
++            "xyk"
++          ],
++          "properties": {
++            "xyk": {
++              "type": "object",
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        },
++        {
++          "type": "object",
++          "required": [
++            "stable"
++          ],
++          "properties": {
++            "stable": {
++              "type": "object",
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        },
++        {
++          "type": "object",
++          "required": [
++            "custom"
++          ],
++          "properties": {
++            "custom": {
++              "type": "string"
++            }
++          },
++          "additionalProperties": false
++        }
++      ]
++    }
++  }
++}
+diff --git a/packages/astroport_juno_types/schema/factory/query_msg.json b/packages/astroport_juno_types/schema/factory/query_msg.json
+new file mode 100644
+index 00000000..2c0ce707
+--- /dev/null
++++ b/packages/astroport_juno_types/schema/factory/query_msg.json
+@@ -0,0 +1,195 @@
++{
++  "$schema": "http://json-schema.org/draft-07/schema#",
++  "title": "QueryMsg",
++  "description": "Factory query surface downstream consumers need.",
++  "oneOf": [
++    {
++      "type": "object",
++      "required": [
++        "config"
++      ],
++      "properties": {
++        "config": {
++          "type": "object",
++          "additionalProperties": false
++        }
++      },
++      "additionalProperties": false
++    },
++    {
++      "type": "object",
++      "required": [
++        "pair"
++      ],
++      "properties": {
++        "pair": {
++          "type": "object",
++          "required": [
++            "asset_infos"
++          ],
++          "properties": {
++            "asset_infos": {
++              "type": "array",
++              "items": {
++                "$ref": "#/definitions/AssetInfo"
++              }
++            }
++          },
++          "additionalProperties": false
++        }
++      },
++      "additionalProperties": false
++    },
++    {
++      "type": "object",
++      "required": [
++        "pairs"
++      ],
++      "properties": {
++        "pairs": {
++          "type": "object",
++          "properties": {
++            "limit": {
++              "type": [
++                "integer",
++                "null"
++              ],
++              "format": "uint32",
++              "minimum": 0.0
++            },
++            "start_after": {
++              "type": [
++                "array",
++                "null"
++              ],
++              "items": {
++                "$ref": "#/definitions/AssetInfo"
++              }
++            }
++          },
++          "additionalProperties": false
++        }
++      },
++      "additionalProperties": false
++    },
++    {
++      "type": "object",
++      "required": [
++        "fee_info"
++      ],
++      "properties": {
++        "fee_info": {
++          "type": "object",
++          "required": [
++            "pair_type"
++          ],
++          "properties": {
++            "pair_type": {
++              "$ref": "#/definitions/PairType"
++            }
++          },
++          "additionalProperties": false
++        }
++      },
++      "additionalProperties": false
++    }
++  ],
++  "definitions": {
++    "Addr": {
++      "description": "A human readable address.\n\nIn Cosmos, this is typically bech32 encoded. But for multi-chain smart contracts no assumptions should be made other than being UTF-8 encoded and of reasonable length.\n\nThis type represents a validated address. It can be created in the following ways 1. Use `Addr::unchecked(input)` 2. Use `let checked: Addr = deps.api.addr_validate(input)?` 3. Use `let checked: Addr = deps.api.addr_humanize(canonical_addr)?` 4. Deserialize from JSON. This must only be done from JSON that was validated before such as a contract's state. `Addr` must not be used in messages sent by the user because this would result in unvalidated instances.\n\nThis type is immutable. If you really need to mutate it (Really? Are you sure?), create a mutable copy using `let mut mutable = Addr::to_string()` and operate on that `String` instance.",
++      "type": "string"
++    },
++    "AssetInfo": {
++      "description": "Discriminates between a native (bank-module) coin and a cw20 token.",
++      "oneOf": [
++        {
++          "description": "Non-native (cw20) token by contract address.",
++          "type": "object",
++          "required": [
++            "token"
++          ],
++          "properties": {
++            "token": {
++              "type": "object",
++              "required": [
++                "contract_addr"
++              ],
++              "properties": {
++                "contract_addr": {
++                  "$ref": "#/definitions/Addr"
++                }
++              },
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        },
++        {
++          "description": "Native (bank) token by denom string.",
++          "type": "object",
++          "required": [
++            "native_token"
++          ],
++          "properties": {
++            "native_token": {
++              "type": "object",
++              "required": [
++                "denom"
++              ],
++              "properties": {
++                "denom": {
++                  "type": "string"
++                }
++              },
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        }
++      ]
++    },
++    "PairType": {
++      "description": "Available pair types in the factory's registry.",
++      "oneOf": [
++        {
++          "type": "object",
++          "required": [
++            "xyk"
++          ],
++          "properties": {
++            "xyk": {
++              "type": "object",
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        },
++        {
++          "type": "object",
++          "required": [
++            "stable"
++          ],
++          "properties": {
++            "stable": {
++              "type": "object",
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        },
++        {
++          "type": "object",
++          "required": [
++            "custom"
++          ],
++          "properties": {
++            "custom": {
++              "type": "string"
++            }
++          },
++          "additionalProperties": false
++        }
++      ]
++    }
++  }
++}
+diff --git a/packages/astroport_juno_types/schema/factory/tracker_config.json b/packages/astroport_juno_types/schema/factory/tracker_config.json
+new file mode 100644
+index 00000000..3eb51053
+--- /dev/null
++++ b/packages/astroport_juno_types/schema/factory/tracker_config.json
+@@ -0,0 +1,21 @@
++{
++  "$schema": "http://json-schema.org/draft-07/schema#",
++  "title": "TrackerConfig",
++  "description": "Tokenfactory tracker hook configuration. None ⇒ no tracker.",
++  "type": "object",
++  "required": [
++    "code_id",
++    "token_factory_addr"
++  ],
++  "properties": {
++    "code_id": {
++      "type": "integer",
++      "format": "uint64",
++      "minimum": 0.0
++    },
++    "token_factory_addr": {
++      "type": "string"
++    }
++  },
++  "additionalProperties": false
++}
+diff --git a/packages/astroport_juno_types/schema/pair/cw20_hook_msg.json b/packages/astroport_juno_types/schema/pair/cw20_hook_msg.json
+new file mode 100644
+index 00000000..f7777091
+--- /dev/null
++++ b/packages/astroport_juno_types/schema/pair/cw20_hook_msg.json
+@@ -0,0 +1,171 @@
++{
++  "$schema": "http://json-schema.org/draft-07/schema#",
++  "title": "Cw20HookMsg",
++  "description": "The cw20 receive-hook message — used when swapping a cw20 token in.",
++  "oneOf": [
++    {
++      "type": "object",
++      "required": [
++        "swap"
++      ],
++      "properties": {
++        "swap": {
++          "type": "object",
++          "properties": {
++            "ask_asset_info": {
++              "anyOf": [
++                {
++                  "$ref": "#/definitions/AssetInfo"
++                },
++                {
++                  "type": "null"
++                }
++              ]
++            },
++            "belief_price": {
++              "anyOf": [
++                {
++                  "$ref": "#/definitions/Decimal"
++                },
++                {
++                  "type": "null"
++                }
++              ]
++            },
++            "max_spread": {
++              "anyOf": [
++                {
++                  "$ref": "#/definitions/Decimal"
++                },
++                {
++                  "type": "null"
++                }
++              ]
++            },
++            "to": {
++              "type": [
++                "string",
++                "null"
++              ]
++            }
++          },
++          "additionalProperties": false
++        }
++      },
++      "additionalProperties": false
++    },
++    {
++      "type": "object",
++      "required": [
++        "withdraw_liquidity"
++      ],
++      "properties": {
++        "withdraw_liquidity": {
++          "type": "object",
++          "required": [
++            "assets"
++          ],
++          "properties": {
++            "assets": {
++              "type": "array",
++              "items": {
++                "$ref": "#/definitions/Asset"
++              }
++            },
++            "min_assets_to_receive": {
++              "type": [
++                "array",
++                "null"
++              ],
++              "items": {
++                "$ref": "#/definitions/Asset"
++              }
++            }
++          },
++          "additionalProperties": false
++        }
++      },
++      "additionalProperties": false
++    }
++  ],
++  "definitions": {
++    "Addr": {
++      "description": "A human readable address.\n\nIn Cosmos, this is typically bech32 encoded. But for multi-chain smart contracts no assumptions should be made other than being UTF-8 encoded and of reasonable length.\n\nThis type represents a validated address. It can be created in the following ways 1. Use `Addr::unchecked(input)` 2. Use `let checked: Addr = deps.api.addr_validate(input)?` 3. Use `let checked: Addr = deps.api.addr_humanize(canonical_addr)?` 4. Deserialize from JSON. This must only be done from JSON that was validated before such as a contract's state. `Addr` must not be used in messages sent by the user because this would result in unvalidated instances.\n\nThis type is immutable. If you really need to mutate it (Really? Are you sure?), create a mutable copy using `let mut mutable = Addr::to_string()` and operate on that `String` instance.",
++      "type": "string"
++    },
++    "Asset": {
++      "description": "An asset (native coin or cw20 token) plus an amount.",
++      "type": "object",
++      "required": [
++        "amount",
++        "info"
++      ],
++      "properties": {
++        "amount": {
++          "$ref": "#/definitions/Uint128"
++        },
++        "info": {
++          "$ref": "#/definitions/AssetInfo"
++        }
++      },
++      "additionalProperties": false
++    },
++    "AssetInfo": {
++      "description": "Discriminates between a native (bank-module) coin and a cw20 token.",
++      "oneOf": [
++        {
++          "description": "Non-native (cw20) token by contract address.",
++          "type": "object",
++          "required": [
++            "token"
++          ],
++          "properties": {
++            "token": {
++              "type": "object",
++              "required": [
++                "contract_addr"
++              ],
++              "properties": {
++                "contract_addr": {
++                  "$ref": "#/definitions/Addr"
++                }
++              },
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        },
++        {
++          "description": "Native (bank) token by denom string.",
++          "type": "object",
++          "required": [
++            "native_token"
++          ],
++          "properties": {
++            "native_token": {
++              "type": "object",
++              "required": [
++                "denom"
++              ],
++              "properties": {
++                "denom": {
++                  "type": "string"
++                }
++              },
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        }
++      ]
++    },
++    "Decimal": {
++      "description": "A fixed-point decimal value with 18 fractional digits, i.e. Decimal(1_000_000_000_000_000_000) == 1.0\n\nThe greatest possible value that can be represented is 340282366920938463463.374607431768211455 (which is (2^128 - 1) / 10^18)",
++      "type": "string"
++    },
++    "Uint128": {
++      "description": "A thin wrapper around u128 that is using strings for JSON encoding/decoding, such that the full u128 range can be used for clients that convert JSON numbers to floats, like JavaScript and jq.\n\n# Examples\n\nUse `from` to create instances of this and `u128` to get the value out:\n\n``` # use cosmwasm_std::Uint128; let a = Uint128::from(123u128); assert_eq!(a.u128(), 123);\n\nlet b = Uint128::from(42u64); assert_eq!(b.u128(), 42);\n\nlet c = Uint128::from(70u32); assert_eq!(c.u128(), 70); ```",
++      "type": "string"
++    }
++  }
++}
+diff --git a/packages/astroport_juno_types/schema/pair/execute_msg.json b/packages/astroport_juno_types/schema/pair/execute_msg.json
+new file mode 100644
+index 00000000..783f4b2f
+--- /dev/null
++++ b/packages/astroport_juno_types/schema/pair/execute_msg.json
+@@ -0,0 +1,270 @@
++{
++  "$schema": "http://json-schema.org/draft-07/schema#",
++  "title": "ExecuteMsg",
++  "description": "The pair execute message surface downstream consumers may need to drive. Admin-side mutations are not mirrored.",
++  "oneOf": [
++    {
++      "type": "object",
++      "required": [
++        "receive"
++      ],
++      "properties": {
++        "receive": {
++          "$ref": "#/definitions/Cw20ReceiveMsg"
++        }
++      },
++      "additionalProperties": false
++    },
++    {
++      "type": "object",
++      "required": [
++        "provide_liquidity"
++      ],
++      "properties": {
++        "provide_liquidity": {
++          "type": "object",
++          "required": [
++            "assets"
++          ],
++          "properties": {
++            "assets": {
++              "type": "array",
++              "items": {
++                "$ref": "#/definitions/Asset"
++              }
++            },
++            "auto_stake": {
++              "type": [
++                "boolean",
++                "null"
++              ]
++            },
++            "min_lp_to_receive": {
++              "anyOf": [
++                {
++                  "$ref": "#/definitions/Uint128"
++                },
++                {
++                  "type": "null"
++                }
++              ]
++            },
++            "receiver": {
++              "type": [
++                "string",
++                "null"
++              ]
++            },
++            "slippage_tolerance": {
++              "anyOf": [
++                {
++                  "$ref": "#/definitions/Decimal"
++                },
++                {
++                  "type": "null"
++                }
++              ]
++            }
++          },
++          "additionalProperties": false
++        }
++      },
++      "additionalProperties": false
++    },
++    {
++      "type": "object",
++      "required": [
++        "withdraw_liquidity"
++      ],
++      "properties": {
++        "withdraw_liquidity": {
++          "type": "object",
++          "required": [
++            "assets"
++          ],
++          "properties": {
++            "assets": {
++              "type": "array",
++              "items": {
++                "$ref": "#/definitions/Asset"
++              }
++            },
++            "min_assets_to_receive": {
++              "type": [
++                "array",
++                "null"
++              ],
++              "items": {
++                "$ref": "#/definitions/Asset"
++              }
++            }
++          },
++          "additionalProperties": false
++        }
++      },
++      "additionalProperties": false
++    },
++    {
++      "type": "object",
++      "required": [
++        "swap"
++      ],
++      "properties": {
++        "swap": {
++          "type": "object",
++          "required": [
++            "offer_asset"
++          ],
++          "properties": {
++            "ask_asset_info": {
++              "anyOf": [
++                {
++                  "$ref": "#/definitions/AssetInfo"
++                },
++                {
++                  "type": "null"
++                }
++              ]
++            },
++            "belief_price": {
++              "anyOf": [
++                {
++                  "$ref": "#/definitions/Decimal"
++                },
++                {
++                  "type": "null"
++                }
++              ]
++            },
++            "max_spread": {
++              "anyOf": [
++                {
++                  "$ref": "#/definitions/Decimal"
++                },
++                {
++                  "type": "null"
++                }
++              ]
++            },
++            "offer_asset": {
++              "$ref": "#/definitions/Asset"
++            },
++            "to": {
++              "type": [
++                "string",
++                "null"
++              ]
++            }
++          },
++          "additionalProperties": false
++        }
++      },
++      "additionalProperties": false
++    }
++  ],
++  "definitions": {
++    "Addr": {
++      "description": "A human readable address.\n\nIn Cosmos, this is typically bech32 encoded. But for multi-chain smart contracts no assumptions should be made other than being UTF-8 encoded and of reasonable length.\n\nThis type represents a validated address. It can be created in the following ways 1. Use `Addr::unchecked(input)` 2. Use `let checked: Addr = deps.api.addr_validate(input)?` 3. Use `let checked: Addr = deps.api.addr_humanize(canonical_addr)?` 4. Deserialize from JSON. This must only be done from JSON that was validated before such as a contract's state. `Addr` must not be used in messages sent by the user because this would result in unvalidated instances.\n\nThis type is immutable. If you really need to mutate it (Really? Are you sure?), create a mutable copy using `let mut mutable = Addr::to_string()` and operate on that `String` instance.",
++      "type": "string"
++    },
++    "Asset": {
++      "description": "An asset (native coin or cw20 token) plus an amount.",
++      "type": "object",
++      "required": [
++        "amount",
++        "info"
++      ],
++      "properties": {
++        "amount": {
++          "$ref": "#/definitions/Uint128"
++        },
++        "info": {
++          "$ref": "#/definitions/AssetInfo"
++        }
++      },
++      "additionalProperties": false
++    },
++    "AssetInfo": {
++      "description": "Discriminates between a native (bank-module) coin and a cw20 token.",
++      "oneOf": [
++        {
++          "description": "Non-native (cw20) token by contract address.",
++          "type": "object",
++          "required": [
++            "token"
++          ],
++          "properties": {
++            "token": {
++              "type": "object",
++              "required": [
++                "contract_addr"
++              ],
++              "properties": {
++                "contract_addr": {
++                  "$ref": "#/definitions/Addr"
++                }
++              },
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        },
++        {
++          "description": "Native (bank) token by denom string.",
++          "type": "object",
++          "required": [
++            "native_token"
++          ],
++          "properties": {
++            "native_token": {
++              "type": "object",
++              "required": [
++                "denom"
++              ],
++              "properties": {
++                "denom": {
++                  "type": "string"
++                }
++              },
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        }
++      ]
++    },
++    "Binary": {
++      "description": "Binary is a wrapper around Vec<u8> to add base64 de/serialization with serde. It also adds some helper methods to help encode inline.\n\nThis is only needed as serde-json-{core,wasm} has a horrible encoding for Vec<u8>. See also <https://github.com/CosmWasm/cosmwasm/blob/main/docs/MESSAGE_TYPES.md>.",
++      "type": "string"
++    },
++    "Cw20ReceiveMsg": {
++      "description": "Cw20ReceiveMsg should be de/serialized under `Receive()` variant in a ExecuteMsg",
++      "type": "object",
++      "required": [
++        "amount",
++        "msg",
++        "sender"
++      ],
++      "properties": {
++        "amount": {
++          "$ref": "#/definitions/Uint128"
++        },
++        "msg": {
++          "$ref": "#/definitions/Binary"
++        },
++        "sender": {
++          "type": "string"
++        }
++      },
++      "additionalProperties": false
++    },
++    "Decimal": {
++      "description": "A fixed-point decimal value with 18 fractional digits, i.e. Decimal(1_000_000_000_000_000_000) == 1.0\n\nThe greatest possible value that can be represented is 340282366920938463463.374607431768211455 (which is (2^128 - 1) / 10^18)",
++      "type": "string"
++    },
++    "Uint128": {
++      "description": "A thin wrapper around u128 that is using strings for JSON encoding/decoding, such that the full u128 range can be used for clients that convert JSON numbers to floats, like JavaScript and jq.\n\n# Examples\n\nUse `from` to create instances of this and `u128` to get the value out:\n\n``` # use cosmwasm_std::Uint128; let a = Uint128::from(123u128); assert_eq!(a.u128(), 123);\n\nlet b = Uint128::from(42u64); assert_eq!(b.u128(), 42);\n\nlet c = Uint128::from(70u32); assert_eq!(c.u128(), 70); ```",
++      "type": "string"
++    }
++  }
++}
+diff --git a/packages/astroport_juno_types/schema/pair/fee_share_config.json b/packages/astroport_juno_types/schema/pair/fee_share_config.json
+new file mode 100644
+index 00000000..65ad7db1
+--- /dev/null
++++ b/packages/astroport_juno_types/schema/pair/fee_share_config.json
+@@ -0,0 +1,27 @@
++{
++  "$schema": "http://json-schema.org/draft-07/schema#",
++  "title": "FeeShareConfig",
++  "description": "Optional fee-share configuration on a pair.",
++  "type": "object",
++  "required": [
++    "bps",
++    "recipient"
++  ],
++  "properties": {
++    "bps": {
++      "type": "integer",
++      "format": "uint16",
++      "minimum": 0.0
++    },
++    "recipient": {
++      "$ref": "#/definitions/Addr"
++    }
++  },
++  "additionalProperties": false,
++  "definitions": {
++    "Addr": {
++      "description": "A human readable address.\n\nIn Cosmos, this is typically bech32 encoded. But for multi-chain smart contracts no assumptions should be made other than being UTF-8 encoded and of reasonable length.\n\nThis type represents a validated address. It can be created in the following ways 1. Use `Addr::unchecked(input)` 2. Use `let checked: Addr = deps.api.addr_validate(input)?` 3. Use `let checked: Addr = deps.api.addr_humanize(canonical_addr)?` 4. Deserialize from JSON. This must only be done from JSON that was validated before such as a contract's state. `Addr` must not be used in messages sent by the user because this would result in unvalidated instances.\n\nThis type is immutable. If you really need to mutate it (Really? Are you sure?), create a mutable copy using `let mut mutable = Addr::to_string()` and operate on that `String` instance.",
++      "type": "string"
++    }
++  }
++}
+diff --git a/packages/astroport_juno_types/schema/pair/instantiate_msg.json b/packages/astroport_juno_types/schema/pair/instantiate_msg.json
+new file mode 100644
+index 00000000..f9672c21
+--- /dev/null
++++ b/packages/astroport_juno_types/schema/pair/instantiate_msg.json
+@@ -0,0 +1,144 @@
++{
++  "$schema": "http://json-schema.org/draft-07/schema#",
++  "title": "InstantiateMsg",
++  "description": "Pair instantiate parameters. Constructed indirectly through the factory's `CreatePair` — never instantiated by downstream contracts.",
++  "type": "object",
++  "required": [
++    "asset_infos",
++    "factory_addr",
++    "pair_type",
++    "token_code_id"
++  ],
++  "properties": {
++    "asset_infos": {
++      "type": "array",
++      "items": {
++        "$ref": "#/definitions/AssetInfo"
++      }
++    },
++    "factory_addr": {
++      "type": "string"
++    },
++    "init_params": {
++      "anyOf": [
++        {
++          "$ref": "#/definitions/Binary"
++        },
++        {
++          "type": "null"
++        }
++      ]
++    },
++    "pair_type": {
++      "$ref": "#/definitions/PairType"
++    },
++    "token_code_id": {
++      "type": "integer",
++      "format": "uint64",
++      "minimum": 0.0
++    }
++  },
++  "additionalProperties": false,
++  "definitions": {
++    "Addr": {
++      "description": "A human readable address.\n\nIn Cosmos, this is typically bech32 encoded. But for multi-chain smart contracts no assumptions should be made other than being UTF-8 encoded and of reasonable length.\n\nThis type represents a validated address. It can be created in the following ways 1. Use `Addr::unchecked(input)` 2. Use `let checked: Addr = deps.api.addr_validate(input)?` 3. Use `let checked: Addr = deps.api.addr_humanize(canonical_addr)?` 4. Deserialize from JSON. This must only be done from JSON that was validated before such as a contract's state. `Addr` must not be used in messages sent by the user because this would result in unvalidated instances.\n\nThis type is immutable. If you really need to mutate it (Really? Are you sure?), create a mutable copy using `let mut mutable = Addr::to_string()` and operate on that `String` instance.",
++      "type": "string"
++    },
++    "AssetInfo": {
++      "description": "Discriminates between a native (bank-module) coin and a cw20 token.",
++      "oneOf": [
++        {
++          "description": "Non-native (cw20) token by contract address.",
++          "type": "object",
++          "required": [
++            "token"
++          ],
++          "properties": {
++            "token": {
++              "type": "object",
++              "required": [
++                "contract_addr"
++              ],
++              "properties": {
++                "contract_addr": {
++                  "$ref": "#/definitions/Addr"
++                }
++              },
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        },
++        {
++          "description": "Native (bank) token by denom string.",
++          "type": "object",
++          "required": [
++            "native_token"
++          ],
++          "properties": {
++            "native_token": {
++              "type": "object",
++              "required": [
++                "denom"
++              ],
++              "properties": {
++                "denom": {
++                  "type": "string"
++                }
++              },
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        }
++      ]
++    },
++    "Binary": {
++      "description": "Binary is a wrapper around Vec<u8> to add base64 de/serialization with serde. It also adds some helper methods to help encode inline.\n\nThis is only needed as serde-json-{core,wasm} has a horrible encoding for Vec<u8>. See also <https://github.com/CosmWasm/cosmwasm/blob/main/docs/MESSAGE_TYPES.md>.",
++      "type": "string"
++    },
++    "PairType": {
++      "description": "Available pair types in the factory's registry.",
++      "oneOf": [
++        {
++          "type": "object",
++          "required": [
++            "xyk"
++          ],
++          "properties": {
++            "xyk": {
++              "type": "object",
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        },
++        {
++          "type": "object",
++          "required": [
++            "stable"
++          ],
++          "properties": {
++            "stable": {
++              "type": "object",
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        },
++        {
++          "type": "object",
++          "required": [
++            "custom"
++          ],
++          "properties": {
++            "custom": {
++              "type": "string"
++            }
++          },
++          "additionalProperties": false
++        }
++      ]
++    }
++  }
++}
+diff --git a/packages/astroport_juno_types/schema/pair/pool_response.json b/packages/astroport_juno_types/schema/pair/pool_response.json
+new file mode 100644
+index 00000000..4f28ebe9
+--- /dev/null
++++ b/packages/astroport_juno_types/schema/pair/pool_response.json
+@@ -0,0 +1,97 @@
++{
++  "$schema": "http://json-schema.org/draft-07/schema#",
++  "title": "PoolResponse",
++  "type": "object",
++  "required": [
++    "assets",
++    "total_share"
++  ],
++  "properties": {
++    "assets": {
++      "type": "array",
++      "items": {
++        "$ref": "#/definitions/Asset"
++      }
++    },
++    "total_share": {
++      "$ref": "#/definitions/Uint128"
++    }
++  },
++  "additionalProperties": false,
++  "definitions": {
++    "Addr": {
++      "description": "A human readable address.\n\nIn Cosmos, this is typically bech32 encoded. But for multi-chain smart contracts no assumptions should be made other than being UTF-8 encoded and of reasonable length.\n\nThis type represents a validated address. It can be created in the following ways 1. Use `Addr::unchecked(input)` 2. Use `let checked: Addr = deps.api.addr_validate(input)?` 3. Use `let checked: Addr = deps.api.addr_humanize(canonical_addr)?` 4. Deserialize from JSON. This must only be done from JSON that was validated before such as a contract's state. `Addr` must not be used in messages sent by the user because this would result in unvalidated instances.\n\nThis type is immutable. If you really need to mutate it (Really? Are you sure?), create a mutable copy using `let mut mutable = Addr::to_string()` and operate on that `String` instance.",
++      "type": "string"
++    },
++    "Asset": {
++      "description": "An asset (native coin or cw20 token) plus an amount.",
++      "type": "object",
++      "required": [
++        "amount",
++        "info"
++      ],
++      "properties": {
++        "amount": {
++          "$ref": "#/definitions/Uint128"
++        },
++        "info": {
++          "$ref": "#/definitions/AssetInfo"
++        }
++      },
++      "additionalProperties": false
++    },
++    "AssetInfo": {
++      "description": "Discriminates between a native (bank-module) coin and a cw20 token.",
++      "oneOf": [
++        {
++          "description": "Non-native (cw20) token by contract address.",
++          "type": "object",
++          "required": [
++            "token"
++          ],
++          "properties": {
++            "token": {
++              "type": "object",
++              "required": [
++                "contract_addr"
++              ],
++              "properties": {
++                "contract_addr": {
++                  "$ref": "#/definitions/Addr"
++                }
++              },
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        },
++        {
++          "description": "Native (bank) token by denom string.",
++          "type": "object",
++          "required": [
++            "native_token"
++          ],
++          "properties": {
++            "native_token": {
++              "type": "object",
++              "required": [
++                "denom"
++              ],
++              "properties": {
++                "denom": {
++                  "type": "string"
++                }
++              },
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        }
++      ]
++    },
++    "Uint128": {
++      "description": "A thin wrapper around u128 that is using strings for JSON encoding/decoding, such that the full u128 range can be used for clients that convert JSON numbers to floats, like JavaScript and jq.\n\n# Examples\n\nUse `from` to create instances of this and `u128` to get the value out:\n\n``` # use cosmwasm_std::Uint128; let a = Uint128::from(123u128); assert_eq!(a.u128(), 123);\n\nlet b = Uint128::from(42u64); assert_eq!(b.u128(), 42);\n\nlet c = Uint128::from(70u32); assert_eq!(c.u128(), 70); ```",
++      "type": "string"
++    }
++  }
++}
+diff --git a/packages/astroport_juno_types/schema/pair/query_msg.json b/packages/astroport_juno_types/schema/pair/query_msg.json
+new file mode 100644
+index 00000000..11cafd1a
+--- /dev/null
++++ b/packages/astroport_juno_types/schema/pair/query_msg.json
+@@ -0,0 +1,171 @@
++{
++  "$schema": "http://json-schema.org/draft-07/schema#",
++  "title": "QueryMsg",
++  "description": "Pair query surface. The simulation-side queries are what the UI and router consume most heavily.",
++  "oneOf": [
++    {
++      "type": "object",
++      "required": [
++        "pair"
++      ],
++      "properties": {
++        "pair": {
++          "type": "object",
++          "additionalProperties": false
++        }
++      },
++      "additionalProperties": false
++    },
++    {
++      "type": "object",
++      "required": [
++        "pool"
++      ],
++      "properties": {
++        "pool": {
++          "type": "object",
++          "additionalProperties": false
++        }
++      },
++      "additionalProperties": false
++    },
++    {
++      "type": "object",
++      "required": [
++        "simulation"
++      ],
++      "properties": {
++        "simulation": {
++          "type": "object",
++          "required": [
++            "offer_asset"
++          ],
++          "properties": {
++            "ask_asset_info": {
++              "anyOf": [
++                {
++                  "$ref": "#/definitions/AssetInfo"
++                },
++                {
++                  "type": "null"
++                }
++              ]
++            },
++            "offer_asset": {
++              "$ref": "#/definitions/Asset"
++            }
++          },
++          "additionalProperties": false
++        }
++      },
++      "additionalProperties": false
++    },
++    {
++      "type": "object",
++      "required": [
++        "reverse_simulation"
++      ],
++      "properties": {
++        "reverse_simulation": {
++          "type": "object",
++          "required": [
++            "ask_asset"
++          ],
++          "properties": {
++            "ask_asset": {
++              "$ref": "#/definitions/Asset"
++            },
++            "offer_asset_info": {
++              "anyOf": [
++                {
++                  "$ref": "#/definitions/AssetInfo"
++                },
++                {
++                  "type": "null"
++                }
++              ]
++            }
++          },
++          "additionalProperties": false
++        }
++      },
++      "additionalProperties": false
++    }
++  ],
++  "definitions": {
++    "Addr": {
++      "description": "A human readable address.\n\nIn Cosmos, this is typically bech32 encoded. But for multi-chain smart contracts no assumptions should be made other than being UTF-8 encoded and of reasonable length.\n\nThis type represents a validated address. It can be created in the following ways 1. Use `Addr::unchecked(input)` 2. Use `let checked: Addr = deps.api.addr_validate(input)?` 3. Use `let checked: Addr = deps.api.addr_humanize(canonical_addr)?` 4. Deserialize from JSON. This must only be done from JSON that was validated before such as a contract's state. `Addr` must not be used in messages sent by the user because this would result in unvalidated instances.\n\nThis type is immutable. If you really need to mutate it (Really? Are you sure?), create a mutable copy using `let mut mutable = Addr::to_string()` and operate on that `String` instance.",
++      "type": "string"
++    },
++    "Asset": {
++      "description": "An asset (native coin or cw20 token) plus an amount.",
++      "type": "object",
++      "required": [
++        "amount",
++        "info"
++      ],
++      "properties": {
++        "amount": {
++          "$ref": "#/definitions/Uint128"
++        },
++        "info": {
++          "$ref": "#/definitions/AssetInfo"
++        }
++      },
++      "additionalProperties": false
++    },
++    "AssetInfo": {
++      "description": "Discriminates between a native (bank-module) coin and a cw20 token.",
++      "oneOf": [
++        {
++          "description": "Non-native (cw20) token by contract address.",
++          "type": "object",
++          "required": [
++            "token"
++          ],
++          "properties": {
++            "token": {
++              "type": "object",
++              "required": [
++                "contract_addr"
++              ],
++              "properties": {
++                "contract_addr": {
++                  "$ref": "#/definitions/Addr"
++                }
++              },
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        },
++        {
++          "description": "Native (bank) token by denom string.",
++          "type": "object",
++          "required": [
++            "native_token"
++          ],
++          "properties": {
++            "native_token": {
++              "type": "object",
++              "required": [
++                "denom"
++              ],
++              "properties": {
++                "denom": {
++                  "type": "string"
++                }
++              },
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        }
++      ]
++    },
++    "Uint128": {
++      "description": "A thin wrapper around u128 that is using strings for JSON encoding/decoding, such that the full u128 range can be used for clients that convert JSON numbers to floats, like JavaScript and jq.\n\n# Examples\n\nUse `from` to create instances of this and `u128` to get the value out:\n\n``` # use cosmwasm_std::Uint128; let a = Uint128::from(123u128); assert_eq!(a.u128(), 123);\n\nlet b = Uint128::from(42u64); assert_eq!(b.u128(), 42);\n\nlet c = Uint128::from(70u32); assert_eq!(c.u128(), 70); ```",
++      "type": "string"
++    }
++  }
++}
+diff --git a/packages/astroport_juno_types/schema/pair/reverse_simulation_response.json b/packages/astroport_juno_types/schema/pair/reverse_simulation_response.json
+new file mode 100644
+index 00000000..1df64709
+--- /dev/null
++++ b/packages/astroport_juno_types/schema/pair/reverse_simulation_response.json
+@@ -0,0 +1,28 @@
++{
++  "$schema": "http://json-schema.org/draft-07/schema#",
++  "title": "ReverseSimulationResponse",
++  "type": "object",
++  "required": [
++    "commission_amount",
++    "offer_amount",
++    "spread_amount"
++  ],
++  "properties": {
++    "commission_amount": {
++      "$ref": "#/definitions/Uint128"
++    },
++    "offer_amount": {
++      "$ref": "#/definitions/Uint128"
++    },
++    "spread_amount": {
++      "$ref": "#/definitions/Uint128"
++    }
++  },
++  "additionalProperties": false,
++  "definitions": {
++    "Uint128": {
++      "description": "A thin wrapper around u128 that is using strings for JSON encoding/decoding, such that the full u128 range can be used for clients that convert JSON numbers to floats, like JavaScript and jq.\n\n# Examples\n\nUse `from` to create instances of this and `u128` to get the value out:\n\n``` # use cosmwasm_std::Uint128; let a = Uint128::from(123u128); assert_eq!(a.u128(), 123);\n\nlet b = Uint128::from(42u64); assert_eq!(b.u128(), 42);\n\nlet c = Uint128::from(70u32); assert_eq!(c.u128(), 70); ```",
++      "type": "string"
++    }
++  }
++}
+diff --git a/packages/astroport_juno_types/schema/pair/simulation_response.json b/packages/astroport_juno_types/schema/pair/simulation_response.json
+new file mode 100644
+index 00000000..dddcb744
+--- /dev/null
++++ b/packages/astroport_juno_types/schema/pair/simulation_response.json
+@@ -0,0 +1,28 @@
++{
++  "$schema": "http://json-schema.org/draft-07/schema#",
++  "title": "SimulationResponse",
++  "type": "object",
++  "required": [
++    "commission_amount",
++    "return_amount",
++    "spread_amount"
++  ],
++  "properties": {
++    "commission_amount": {
++      "$ref": "#/definitions/Uint128"
++    },
++    "return_amount": {
++      "$ref": "#/definitions/Uint128"
++    },
++    "spread_amount": {
++      "$ref": "#/definitions/Uint128"
++    }
++  },
++  "additionalProperties": false,
++  "definitions": {
++    "Uint128": {
++      "description": "A thin wrapper around u128 that is using strings for JSON encoding/decoding, such that the full u128 range can be used for clients that convert JSON numbers to floats, like JavaScript and jq.\n\n# Examples\n\nUse `from` to create instances of this and `u128` to get the value out:\n\n``` # use cosmwasm_std::Uint128; let a = Uint128::from(123u128); assert_eq!(a.u128(), 123);\n\nlet b = Uint128::from(42u64); assert_eq!(b.u128(), 42);\n\nlet c = Uint128::from(70u32); assert_eq!(c.u128(), 70); ```",
++      "type": "string"
++    }
++  }
++}
+diff --git a/packages/astroport_juno_types/schema/pair/x_y_k_pool_params.json b/packages/astroport_juno_types/schema/pair/x_y_k_pool_params.json
+new file mode 100644
+index 00000000..c05b4841
+--- /dev/null
++++ b/packages/astroport_juno_types/schema/pair/x_y_k_pool_params.json
+@@ -0,0 +1,42 @@
++{
++  "$schema": "http://json-schema.org/draft-07/schema#",
++  "title": "XYKPoolParams",
++  "description": "XYK pool initialization parameters, decoded by the pair contract from the `InstantiateMsg.init_params: Option<Binary>` field.",
++  "type": "object",
++  "properties": {
++    "pool_unpause_at": {
++      "description": "MEV-protection pause window. While `block.time < pool_unpause_at`, swaps revert with `PoolPaused`. LP entry points remain callable during the pause. None ⇒ no pause enforced.",
++      "default": null,
++      "anyOf": [
++        {
++          "$ref": "#/definitions/Timestamp"
++        },
++        {
++          "type": "null"
++        }
++      ]
++    },
++    "track_asset_balances": {
++      "description": "Snapshot LP-side asset balances per block. Cannot be disabled after instantiation if enabled.",
++      "type": [
++        "boolean",
++        "null"
++      ]
++    }
++  },
++  "additionalProperties": false,
++  "definitions": {
++    "Timestamp": {
++      "description": "A point in time in nanosecond precision.\n\nThis type can represent times from 1970-01-01T00:00:00Z to 2554-07-21T23:34:33Z.\n\n## Examples\n\n``` # use cosmwasm_std::Timestamp; let ts = Timestamp::from_nanos(1_000_000_202); assert_eq!(ts.nanos(), 1_000_000_202); assert_eq!(ts.seconds(), 1); assert_eq!(ts.subsec_nanos(), 202);\n\nlet ts = ts.plus_seconds(2); assert_eq!(ts.nanos(), 3_000_000_202); assert_eq!(ts.seconds(), 3); assert_eq!(ts.subsec_nanos(), 202); ```",
++      "allOf": [
++        {
++          "$ref": "#/definitions/Uint64"
++        }
++      ]
++    },
++    "Uint64": {
++      "description": "A thin wrapper around u64 that is using strings for JSON encoding/decoding, such that the full u64 range can be used for clients that convert JSON numbers to floats, like JavaScript and jq.\n\n# Examples\n\nUse `from` to create instances of this and `u64` to get the value out:\n\n``` # use cosmwasm_std::Uint64; let a = Uint64::from(42u64); assert_eq!(a.u64(), 42);\n\nlet b = Uint64::from(70u32); assert_eq!(b.u64(), 70); ```",
++      "type": "string"
++    }
++  }
++}
+diff --git a/packages/astroport_juno_types/schema/router/config_response.json b/packages/astroport_juno_types/schema/router/config_response.json
+new file mode 100644
+index 00000000..a3033d27
+--- /dev/null
++++ b/packages/astroport_juno_types/schema/router/config_response.json
+@@ -0,0 +1,14 @@
++{
++  "$schema": "http://json-schema.org/draft-07/schema#",
++  "title": "ConfigResponse",
++  "type": "object",
++  "required": [
++    "astroport_factory"
++  ],
++  "properties": {
++    "astroport_factory": {
++      "type": "string"
++    }
++  },
++  "additionalProperties": false
++}
+diff --git a/packages/astroport_juno_types/schema/router/cw20_hook_msg.json b/packages/astroport_juno_types/schema/router/cw20_hook_msg.json
+new file mode 100644
+index 00000000..996613f9
+--- /dev/null
++++ b/packages/astroport_juno_types/schema/router/cw20_hook_msg.json
+@@ -0,0 +1,173 @@
++{
++  "$schema": "http://json-schema.org/draft-07/schema#",
++  "title": "Cw20HookMsg",
++  "oneOf": [
++    {
++      "type": "object",
++      "required": [
++        "execute_swap_operations"
++      ],
++      "properties": {
++        "execute_swap_operations": {
++          "type": "object",
++          "required": [
++            "operations"
++          ],
++          "properties": {
++            "max_spread": {
++              "anyOf": [
++                {
++                  "$ref": "#/definitions/Decimal"
++                },
++                {
++                  "type": "null"
++                }
++              ]
++            },
++            "minimum_receive": {
++              "anyOf": [
++                {
++                  "$ref": "#/definitions/Uint128"
++                },
++                {
++                  "type": "null"
++                }
++              ]
++            },
++            "operations": {
++              "type": "array",
++              "items": {
++                "$ref": "#/definitions/SwapOperation"
++              }
++            },
++            "to": {
++              "type": [
++                "string",
++                "null"
++              ]
++            }
++          },
++          "additionalProperties": false
++        }
++      },
++      "additionalProperties": false
++    }
++  ],
++  "definitions": {
++    "Addr": {
++      "description": "A human readable address.\n\nIn Cosmos, this is typically bech32 encoded. But for multi-chain smart contracts no assumptions should be made other than being UTF-8 encoded and of reasonable length.\n\nThis type represents a validated address. It can be created in the following ways 1. Use `Addr::unchecked(input)` 2. Use `let checked: Addr = deps.api.addr_validate(input)?` 3. Use `let checked: Addr = deps.api.addr_humanize(canonical_addr)?` 4. Deserialize from JSON. This must only be done from JSON that was validated before such as a contract's state. `Addr` must not be used in messages sent by the user because this would result in unvalidated instances.\n\nThis type is immutable. If you really need to mutate it (Really? Are you sure?), create a mutable copy using `let mut mutable = Addr::to_string()` and operate on that `String` instance.",
++      "type": "string"
++    },
++    "AssetInfo": {
++      "description": "Discriminates between a native (bank-module) coin and a cw20 token.",
++      "oneOf": [
++        {
++          "description": "Non-native (cw20) token by contract address.",
++          "type": "object",
++          "required": [
++            "token"
++          ],
++          "properties": {
++            "token": {
++              "type": "object",
++              "required": [
++                "contract_addr"
++              ],
++              "properties": {
++                "contract_addr": {
++                  "$ref": "#/definitions/Addr"
++                }
++              },
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        },
++        {
++          "description": "Native (bank) token by denom string.",
++          "type": "object",
++          "required": [
++            "native_token"
++          ],
++          "properties": {
++            "native_token": {
++              "type": "object",
++              "required": [
++                "denom"
++              ],
++              "properties": {
++                "denom": {
++                  "type": "string"
++                }
++              },
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        }
++      ]
++    },
++    "Decimal": {
++      "description": "A fixed-point decimal value with 18 fractional digits, i.e. Decimal(1_000_000_000_000_000_000) == 1.0\n\nThe greatest possible value that can be represented is 340282366920938463463.374607431768211455 (which is (2^128 - 1) / 10^18)",
++      "type": "string"
++    },
++    "SwapOperation": {
++      "oneOf": [
++        {
++          "type": "object",
++          "required": [
++            "native_swap"
++          ],
++          "properties": {
++            "native_swap": {
++              "type": "object",
++              "required": [
++                "ask_denom",
++                "offer_denom"
++              ],
++              "properties": {
++                "ask_denom": {
++                  "type": "string"
++                },
++                "offer_denom": {
++                  "type": "string"
++                }
++              },
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        },
++        {
++          "type": "object",
++          "required": [
++            "astro_swap"
++          ],
++          "properties": {
++            "astro_swap": {
++              "type": "object",
++              "required": [
++                "ask_asset_info",
++                "offer_asset_info"
++              ],
++              "properties": {
++                "ask_asset_info": {
++                  "$ref": "#/definitions/AssetInfo"
++                },
++                "offer_asset_info": {
++                  "$ref": "#/definitions/AssetInfo"
++                }
++              },
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        }
++      ]
++    },
++    "Uint128": {
++      "description": "A thin wrapper around u128 that is using strings for JSON encoding/decoding, such that the full u128 range can be used for clients that convert JSON numbers to floats, like JavaScript and jq.\n\n# Examples\n\nUse `from` to create instances of this and `u128` to get the value out:\n\n``` # use cosmwasm_std::Uint128; let a = Uint128::from(123u128); assert_eq!(a.u128(), 123);\n\nlet b = Uint128::from(42u64); assert_eq!(b.u128(), 42);\n\nlet c = Uint128::from(70u32); assert_eq!(c.u128(), 70); ```",
++      "type": "string"
++    }
++  }
++}
+diff --git a/packages/astroport_juno_types/schema/router/execute_msg.json b/packages/astroport_juno_types/schema/router/execute_msg.json
+new file mode 100644
+index 00000000..5ef9dfdf
+--- /dev/null
++++ b/packages/astroport_juno_types/schema/router/execute_msg.json
+@@ -0,0 +1,251 @@
++{
++  "$schema": "http://json-schema.org/draft-07/schema#",
++  "title": "ExecuteMsg",
++  "oneOf": [
++    {
++      "type": "object",
++      "required": [
++        "receive"
++      ],
++      "properties": {
++        "receive": {
++          "$ref": "#/definitions/Cw20ReceiveMsg"
++        }
++      },
++      "additionalProperties": false
++    },
++    {
++      "type": "object",
++      "required": [
++        "execute_swap_operations"
++      ],
++      "properties": {
++        "execute_swap_operations": {
++          "type": "object",
++          "required": [
++            "operations"
++          ],
++          "properties": {
++            "max_spread": {
++              "anyOf": [
++                {
++                  "$ref": "#/definitions/Decimal"
++                },
++                {
++                  "type": "null"
++                }
++              ]
++            },
++            "minimum_receive": {
++              "anyOf": [
++                {
++                  "$ref": "#/definitions/Uint128"
++                },
++                {
++                  "type": "null"
++                }
++              ]
++            },
++            "operations": {
++              "type": "array",
++              "items": {
++                "$ref": "#/definitions/SwapOperation"
++              }
++            },
++            "to": {
++              "type": [
++                "string",
++                "null"
++              ]
++            }
++          },
++          "additionalProperties": false
++        }
++      },
++      "additionalProperties": false
++    },
++    {
++      "type": "object",
++      "required": [
++        "execute_swap_operation"
++      ],
++      "properties": {
++        "execute_swap_operation": {
++          "type": "object",
++          "required": [
++            "operation",
++            "single"
++          ],
++          "properties": {
++            "max_spread": {
++              "anyOf": [
++                {
++                  "$ref": "#/definitions/Decimal"
++                },
++                {
++                  "type": "null"
++                }
++              ]
++            },
++            "operation": {
++              "$ref": "#/definitions/SwapOperation"
++            },
++            "single": {
++              "type": "boolean"
++            },
++            "to": {
++              "type": [
++                "string",
++                "null"
++              ]
++            }
++          },
++          "additionalProperties": false
++        }
++      },
++      "additionalProperties": false
++    }
++  ],
++  "definitions": {
++    "Addr": {
++      "description": "A human readable address.\n\nIn Cosmos, this is typically bech32 encoded. But for multi-chain smart contracts no assumptions should be made other than being UTF-8 encoded and of reasonable length.\n\nThis type represents a validated address. It can be created in the following ways 1. Use `Addr::unchecked(input)` 2. Use `let checked: Addr = deps.api.addr_validate(input)?` 3. Use `let checked: Addr = deps.api.addr_humanize(canonical_addr)?` 4. Deserialize from JSON. This must only be done from JSON that was validated before such as a contract's state. `Addr` must not be used in messages sent by the user because this would result in unvalidated instances.\n\nThis type is immutable. If you really need to mutate it (Really? Are you sure?), create a mutable copy using `let mut mutable = Addr::to_string()` and operate on that `String` instance.",
++      "type": "string"
++    },
++    "AssetInfo": {
++      "description": "Discriminates between a native (bank-module) coin and a cw20 token.",
++      "oneOf": [
++        {
++          "description": "Non-native (cw20) token by contract address.",
++          "type": "object",
++          "required": [
++            "token"
++          ],
++          "properties": {
++            "token": {
++              "type": "object",
++              "required": [
++                "contract_addr"
++              ],
++              "properties": {
++                "contract_addr": {
++                  "$ref": "#/definitions/Addr"
++                }
++              },
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        },
++        {
++          "description": "Native (bank) token by denom string.",
++          "type": "object",
++          "required": [
++            "native_token"
++          ],
++          "properties": {
++            "native_token": {
++              "type": "object",
++              "required": [
++                "denom"
++              ],
++              "properties": {
++                "denom": {
++                  "type": "string"
++                }
++              },
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        }
++      ]
++    },
++    "Binary": {
++      "description": "Binary is a wrapper around Vec<u8> to add base64 de/serialization with serde. It also adds some helper methods to help encode inline.\n\nThis is only needed as serde-json-{core,wasm} has a horrible encoding for Vec<u8>. See also <https://github.com/CosmWasm/cosmwasm/blob/main/docs/MESSAGE_TYPES.md>.",
++      "type": "string"
++    },
++    "Cw20ReceiveMsg": {
++      "description": "Cw20ReceiveMsg should be de/serialized under `Receive()` variant in a ExecuteMsg",
++      "type": "object",
++      "required": [
++        "amount",
++        "msg",
++        "sender"
++      ],
++      "properties": {
++        "amount": {
++          "$ref": "#/definitions/Uint128"
++        },
++        "msg": {
++          "$ref": "#/definitions/Binary"
++        },
++        "sender": {
++          "type": "string"
++        }
++      },
++      "additionalProperties": false
++    },
++    "Decimal": {
++      "description": "A fixed-point decimal value with 18 fractional digits, i.e. Decimal(1_000_000_000_000_000_000) == 1.0\n\nThe greatest possible value that can be represented is 340282366920938463463.374607431768211455 (which is (2^128 - 1) / 10^18)",
++      "type": "string"
++    },
++    "SwapOperation": {
++      "oneOf": [
++        {
++          "type": "object",
++          "required": [
++            "native_swap"
++          ],
++          "properties": {
++            "native_swap": {
++              "type": "object",
++              "required": [
++                "ask_denom",
++                "offer_denom"
++              ],
++              "properties": {
++                "ask_denom": {
++                  "type": "string"
++                },
++                "offer_denom": {
++                  "type": "string"
++                }
++              },
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        },
++        {
++          "type": "object",
++          "required": [
++            "astro_swap"
++          ],
++          "properties": {
++            "astro_swap": {
++              "type": "object",
++              "required": [
++                "ask_asset_info",
++                "offer_asset_info"
++              ],
++              "properties": {
++                "ask_asset_info": {
++                  "$ref": "#/definitions/AssetInfo"
++                },
++                "offer_asset_info": {
++                  "$ref": "#/definitions/AssetInfo"
++                }
++              },
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        }
++      ]
++    },
++    "Uint128": {
++      "description": "A thin wrapper around u128 that is using strings for JSON encoding/decoding, such that the full u128 range can be used for clients that convert JSON numbers to floats, like JavaScript and jq.\n\n# Examples\n\nUse `from` to create instances of this and `u128` to get the value out:\n\n``` # use cosmwasm_std::Uint128; let a = Uint128::from(123u128); assert_eq!(a.u128(), 123);\n\nlet b = Uint128::from(42u64); assert_eq!(b.u128(), 42);\n\nlet c = Uint128::from(70u32); assert_eq!(c.u128(), 70); ```",
++      "type": "string"
++    }
++  }
++}
+diff --git a/packages/astroport_juno_types/schema/router/instantiate_msg.json b/packages/astroport_juno_types/schema/router/instantiate_msg.json
+new file mode 100644
+index 00000000..eb48dea5
+--- /dev/null
++++ b/packages/astroport_juno_types/schema/router/instantiate_msg.json
+@@ -0,0 +1,14 @@
++{
++  "$schema": "http://json-schema.org/draft-07/schema#",
++  "title": "InstantiateMsg",
++  "type": "object",
++  "required": [
++    "astroport_factory"
++  ],
++  "properties": {
++    "astroport_factory": {
++      "type": "string"
++    }
++  },
++  "additionalProperties": false
++}
+diff --git a/packages/astroport_juno_types/schema/router/query_msg.json b/packages/astroport_juno_types/schema/router/query_msg.json
+new file mode 100644
+index 00000000..16318cdc
+--- /dev/null
++++ b/packages/astroport_juno_types/schema/router/query_msg.json
+@@ -0,0 +1,188 @@
++{
++  "$schema": "http://json-schema.org/draft-07/schema#",
++  "title": "QueryMsg",
++  "oneOf": [
++    {
++      "type": "object",
++      "required": [
++        "config"
++      ],
++      "properties": {
++        "config": {
++          "type": "object",
++          "additionalProperties": false
++        }
++      },
++      "additionalProperties": false
++    },
++    {
++      "type": "object",
++      "required": [
++        "simulate_swap_operations"
++      ],
++      "properties": {
++        "simulate_swap_operations": {
++          "type": "object",
++          "required": [
++            "offer_amount",
++            "operations"
++          ],
++          "properties": {
++            "offer_amount": {
++              "$ref": "#/definitions/Uint128"
++            },
++            "operations": {
++              "type": "array",
++              "items": {
++                "$ref": "#/definitions/SwapOperation"
++              }
++            }
++          },
++          "additionalProperties": false
++        }
++      },
++      "additionalProperties": false
++    },
++    {
++      "type": "object",
++      "required": [
++        "reverse_simulate_swap_operations"
++      ],
++      "properties": {
++        "reverse_simulate_swap_operations": {
++          "type": "object",
++          "required": [
++            "ask_amount",
++            "operations"
++          ],
++          "properties": {
++            "ask_amount": {
++              "$ref": "#/definitions/Uint128"
++            },
++            "operations": {
++              "type": "array",
++              "items": {
++                "$ref": "#/definitions/SwapOperation"
++              }
++            }
++          },
++          "additionalProperties": false
++        }
++      },
++      "additionalProperties": false
++    }
++  ],
++  "definitions": {
++    "Addr": {
++      "description": "A human readable address.\n\nIn Cosmos, this is typically bech32 encoded. But for multi-chain smart contracts no assumptions should be made other than being UTF-8 encoded and of reasonable length.\n\nThis type represents a validated address. It can be created in the following ways 1. Use `Addr::unchecked(input)` 2. Use `let checked: Addr = deps.api.addr_validate(input)?` 3. Use `let checked: Addr = deps.api.addr_humanize(canonical_addr)?` 4. Deserialize from JSON. This must only be done from JSON that was validated before such as a contract's state. `Addr` must not be used in messages sent by the user because this would result in unvalidated instances.\n\nThis type is immutable. If you really need to mutate it (Really? Are you sure?), create a mutable copy using `let mut mutable = Addr::to_string()` and operate on that `String` instance.",
++      "type": "string"
++    },
++    "AssetInfo": {
++      "description": "Discriminates between a native (bank-module) coin and a cw20 token.",
++      "oneOf": [
++        {
++          "description": "Non-native (cw20) token by contract address.",
++          "type": "object",
++          "required": [
++            "token"
++          ],
++          "properties": {
++            "token": {
++              "type": "object",
++              "required": [
++                "contract_addr"
++              ],
++              "properties": {
++                "contract_addr": {
++                  "$ref": "#/definitions/Addr"
++                }
++              },
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        },
++        {
++          "description": "Native (bank) token by denom string.",
++          "type": "object",
++          "required": [
++            "native_token"
++          ],
++          "properties": {
++            "native_token": {
++              "type": "object",
++              "required": [
++                "denom"
++              ],
++              "properties": {
++                "denom": {
++                  "type": "string"
++                }
++              },
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        }
++      ]
++    },
++    "SwapOperation": {
++      "oneOf": [
++        {
++          "type": "object",
++          "required": [
++            "native_swap"
++          ],
++          "properties": {
++            "native_swap": {
++              "type": "object",
++              "required": [
++                "ask_denom",
++                "offer_denom"
++              ],
++              "properties": {
++                "ask_denom": {
++                  "type": "string"
++                },
++                "offer_denom": {
++                  "type": "string"
++                }
++              },
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        },
++        {
++          "type": "object",
++          "required": [
++            "astro_swap"
++          ],
++          "properties": {
++            "astro_swap": {
++              "type": "object",
++              "required": [
++                "ask_asset_info",
++                "offer_asset_info"
++              ],
++              "properties": {
++                "ask_asset_info": {
++                  "$ref": "#/definitions/AssetInfo"
++                },
++                "offer_asset_info": {
++                  "$ref": "#/definitions/AssetInfo"
++                }
++              },
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        }
++      ]
++    },
++    "Uint128": {
++      "description": "A thin wrapper around u128 that is using strings for JSON encoding/decoding, such that the full u128 range can be used for clients that convert JSON numbers to floats, like JavaScript and jq.\n\n# Examples\n\nUse `from` to create instances of this and `u128` to get the value out:\n\n``` # use cosmwasm_std::Uint128; let a = Uint128::from(123u128); assert_eq!(a.u128(), 123);\n\nlet b = Uint128::from(42u64); assert_eq!(b.u128(), 42);\n\nlet c = Uint128::from(70u32); assert_eq!(c.u128(), 70); ```",
++      "type": "string"
++    }
++  }
++}
+diff --git a/packages/astroport_juno_types/schema/router/simulate_swap_operations_response.json b/packages/astroport_juno_types/schema/router/simulate_swap_operations_response.json
+new file mode 100644
+index 00000000..b15e18ee
+--- /dev/null
++++ b/packages/astroport_juno_types/schema/router/simulate_swap_operations_response.json
+@@ -0,0 +1,20 @@
++{
++  "$schema": "http://json-schema.org/draft-07/schema#",
++  "title": "SimulateSwapOperationsResponse",
++  "type": "object",
++  "required": [
++    "amount"
++  ],
++  "properties": {
++    "amount": {
++      "$ref": "#/definitions/Uint128"
++    }
++  },
++  "additionalProperties": false,
++  "definitions": {
++    "Uint128": {
++      "description": "A thin wrapper around u128 that is using strings for JSON encoding/decoding, such that the full u128 range can be used for clients that convert JSON numbers to floats, like JavaScript and jq.\n\n# Examples\n\nUse `from` to create instances of this and `u128` to get the value out:\n\n``` # use cosmwasm_std::Uint128; let a = Uint128::from(123u128); assert_eq!(a.u128(), 123);\n\nlet b = Uint128::from(42u64); assert_eq!(b.u128(), 42);\n\nlet c = Uint128::from(70u32); assert_eq!(c.u128(), 70); ```",
++      "type": "string"
++    }
++  }
++}
+diff --git a/packages/astroport_juno_types/schema/router/swap_operation.json b/packages/astroport_juno_types/schema/router/swap_operation.json
+new file mode 100644
+index 00000000..325ddcf1
+--- /dev/null
++++ b/packages/astroport_juno_types/schema/router/swap_operation.json
+@@ -0,0 +1,111 @@
++{
++  "$schema": "http://json-schema.org/draft-07/schema#",
++  "title": "SwapOperation",
++  "oneOf": [
++    {
++      "type": "object",
++      "required": [
++        "native_swap"
++      ],
++      "properties": {
++        "native_swap": {
++          "type": "object",
++          "required": [
++            "ask_denom",
++            "offer_denom"
++          ],
++          "properties": {
++            "ask_denom": {
++              "type": "string"
++            },
++            "offer_denom": {
++              "type": "string"
++            }
++          },
++          "additionalProperties": false
++        }
++      },
++      "additionalProperties": false
++    },
++    {
++      "type": "object",
++      "required": [
++        "astro_swap"
++      ],
++      "properties": {
++        "astro_swap": {
++          "type": "object",
++          "required": [
++            "ask_asset_info",
++            "offer_asset_info"
++          ],
++          "properties": {
++            "ask_asset_info": {
++              "$ref": "#/definitions/AssetInfo"
++            },
++            "offer_asset_info": {
++              "$ref": "#/definitions/AssetInfo"
++            }
++          },
++          "additionalProperties": false
++        }
++      },
++      "additionalProperties": false
++    }
++  ],
++  "definitions": {
++    "Addr": {
++      "description": "A human readable address.\n\nIn Cosmos, this is typically bech32 encoded. But for multi-chain smart contracts no assumptions should be made other than being UTF-8 encoded and of reasonable length.\n\nThis type represents a validated address. It can be created in the following ways 1. Use `Addr::unchecked(input)` 2. Use `let checked: Addr = deps.api.addr_validate(input)?` 3. Use `let checked: Addr = deps.api.addr_humanize(canonical_addr)?` 4. Deserialize from JSON. This must only be done from JSON that was validated before such as a contract's state. `Addr` must not be used in messages sent by the user because this would result in unvalidated instances.\n\nThis type is immutable. If you really need to mutate it (Really? Are you sure?), create a mutable copy using `let mut mutable = Addr::to_string()` and operate on that `String` instance.",
++      "type": "string"
++    },
++    "AssetInfo": {
++      "description": "Discriminates between a native (bank-module) coin and a cw20 token.",
++      "oneOf": [
++        {
++          "description": "Non-native (cw20) token by contract address.",
++          "type": "object",
++          "required": [
++            "token"
++          ],
++          "properties": {
++            "token": {
++              "type": "object",
++              "required": [
++                "contract_addr"
++              ],
++              "properties": {
++                "contract_addr": {
++                  "$ref": "#/definitions/Addr"
++                }
++              },
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        },
++        {
++          "description": "Native (bank) token by denom string.",
++          "type": "object",
++          "required": [
++            "native_token"
++          ],
++          "properties": {
++            "native_token": {
++              "type": "object",
++              "required": [
++                "denom"
++              ],
++              "properties": {
++                "denom": {
++                  "type": "string"
++                }
++              },
++              "additionalProperties": false
++            }
++          },
++          "additionalProperties": false
++        }
++      ]
++    }
++  }
++}
+diff --git a/packages/astroport_juno_types/schema/router/swap_response_data.json b/packages/astroport_juno_types/schema/router/swap_response_data.json
+new file mode 100644
+index 00000000..2b5824ac
+--- /dev/null
++++ b/packages/astroport_juno_types/schema/router/swap_response_data.json
+@@ -0,0 +1,20 @@
++{
++  "$schema": "http://json-schema.org/draft-07/schema#",
++  "title": "SwapResponseData",
++  "type": "object",
++  "required": [
++    "return_amount"
++  ],
++  "properties": {
++    "return_amount": {
++      "$ref": "#/definitions/Uint128"
++    }
++  },
++  "additionalProperties": false,
++  "definitions": {
++    "Uint128": {
++      "description": "A thin wrapper around u128 that is using strings for JSON encoding/decoding, such that the full u128 range can be used for clients that convert JSON numbers to floats, like JavaScript and jq.\n\n# Examples\n\nUse `from` to create instances of this and `u128` to get the value out:\n\n``` # use cosmwasm_std::Uint128; let a = Uint128::from(123u128); assert_eq!(a.u128(), 123);\n\nlet b = Uint128::from(42u64); assert_eq!(b.u128(), 42);\n\nlet c = Uint128::from(70u32); assert_eq!(c.u128(), 70); ```",
++      "type": "string"
++    }
++  }
++}
+diff --git a/packages/astroport_juno_types/src/asset.rs b/packages/astroport_juno_types/src/asset.rs
+new file mode 100644
+index 00000000..fbfaf539
+--- /dev/null
++++ b/packages/astroport_juno_types/src/asset.rs
+@@ -0,0 +1,33 @@
++//! Wire-type mirror of `astroport::asset` subset needed by downstream
++//! consumers. Identical JSON serialization to the GPL `astroport` crate;
++//! the drift gate (`scripts/check_juno_types_drift.sh`) enforces this.
++
++use crate::factory::PairType;
++use cosmwasm_schema::cw_serde;
++use cosmwasm_std::{Addr, Uint128};
++
++/// An asset (native coin or cw20 token) plus an amount.
++#[cw_serde]
++pub struct Asset {
++    pub info: AssetInfo,
++    pub amount: Uint128,
++}
++
++/// Discriminates between a native (bank-module) coin and a cw20 token.
++#[cw_serde]
++#[derive(Eq)]
++pub enum AssetInfo {
++    /// Non-native (cw20) token by contract address.
++    Token { contract_addr: Addr },
++    /// Native (bank) token by denom string.
++    NativeToken { denom: String },
++}
++
++/// The factory's PairInfo response shape.
++#[cw_serde]
++pub struct PairInfo {
++    pub asset_infos: Vec<AssetInfo>,
++    pub contract_addr: Addr,
++    pub liquidity_token: String,
++    pub pair_type: PairType,
++}
+diff --git a/packages/astroport_juno_types/src/factory.rs b/packages/astroport_juno_types/src/factory.rs
+new file mode 100644
+index 00000000..cd275d15
+--- /dev/null
++++ b/packages/astroport_juno_types/src/factory.rs
+@@ -0,0 +1,118 @@
++//! Wire-type mirror of `astroport::factory` subset needed by downstream
++//! consumers to construct `CreatePair` calls and read pair-registry queries.
++
++use crate::asset::{AssetInfo, PairInfo};
++use cosmwasm_schema::{cw_serde, QueryResponses};
++use cosmwasm_std::{Addr, Binary};
++use std::fmt::{Display, Formatter, Result};
++
++/// Available pair types in the factory's registry.
++#[derive(Eq)]
++#[cw_serde]
++pub enum PairType {
++    Xyk {},
++    Stable {},
++    Custom(String),
++}
++
++impl Display for PairType {
++    fn fmt(&self, fmt: &mut Formatter) -> Result {
++        match self {
++            PairType::Xyk {} => fmt.write_str("xyk"),
++            PairType::Stable {} => fmt.write_str("stable"),
++            PairType::Custom(t) => fmt.write_str(format!("custom-{}", t).as_str()),
++        }
++    }
++}
++
++/// A pair-type configuration entry registered in the factory.
++#[cw_serde]
++pub struct PairConfig {
++    pub code_id: u64,
++    pub pair_type: PairType,
++    pub total_fee_bps: u16,
++    pub maker_fee_bps: u16,
++    #[serde(default)]
++    pub is_disabled: bool,
++    #[serde(default)]
++    pub is_generator_disabled: bool,
++    #[serde(default)]
++    pub permissioned: bool,
++    #[serde(default)]
++    pub whitelist: Option<Vec<String>>,
++}
++
++/// Tokenfactory tracker hook configuration. None ⇒ no tracker.
++#[cw_serde]
++pub struct TrackerConfig {
++    pub code_id: u64,
++    pub token_factory_addr: String,
++}
++
++/// Factory instantiate parameters.
++#[cw_serde]
++pub struct InstantiateMsg {
++    pub pair_configs: Vec<PairConfig>,
++    pub token_code_id: u64,
++    pub fee_address: Option<String>,
++    pub generator_address: Option<String>,
++    pub owner: String,
++    pub whitelist_code_id: u64,
++    pub coin_registry_address: String,
++    pub tracker_config: Option<TrackerConfig>,
++}
++
++/// The factory execute message surface downstream consumers need. This
++/// crate intentionally exposes only the cross-contract-callable variants
++/// — admin-side mutations (UpdateConfig, etc.) are not mirrored.
++#[cw_serde]
++pub enum ExecuteMsg {
++    /// Create a new pair of `pair_type` over the two `asset_infos`. Pair
++    /// init params are passed verbatim through to the pair contract's
++    /// `InstantiateMsg.init_params`.
++    CreatePair {
++        pair_type: PairType,
++        asset_infos: Vec<AssetInfo>,
++        init_params: Option<Binary>,
++    },
++}
++
++/// Factory query surface downstream consumers need.
++#[cw_serde]
++#[derive(QueryResponses)]
++pub enum QueryMsg {
++    #[returns(ConfigResponse)]
++    Config {},
++    #[returns(PairInfo)]
++    Pair { asset_infos: Vec<AssetInfo> },
++    #[returns(PairsResponse)]
++    Pairs {
++        start_after: Option<Vec<AssetInfo>>,
++        limit: Option<u32>,
++    },
++    #[returns(FeeInfoResponse)]
++    FeeInfo { pair_type: PairType },
++}
++
++#[cw_serde]
++pub struct ConfigResponse {
++    pub owner: Addr,
++    pub pair_configs: Vec<PairConfig>,
++    pub token_code_id: u64,
++    pub fee_address: Option<Addr>,
++    pub generator_address: Option<Addr>,
++    pub whitelist_code_id: u64,
++    pub coin_registry_address: Addr,
++}
++
++#[cw_serde]
++pub struct PairsResponse {
++    pub pairs: Vec<PairInfo>,
++}
++
++#[cw_serde]
++pub struct FeeInfoResponse {
++    pub fee_address: Option<Addr>,
++    pub total_fee_bps: u16,
++    pub maker_fee_bps: u16,
++}
+diff --git a/packages/astroport_juno_types/src/lib.rs b/packages/astroport_juno_types/src/lib.rs
+new file mode 100644
+index 00000000..f3674d11
+--- /dev/null
++++ b/packages/astroport_juno_types/src/lib.rs
+@@ -0,0 +1,19 @@
++//! MIT-licensed wire-type mirror for `astroport-juno` contracts (factory,
++//! pair, router, asset). Downstream CosmWasm contracts that need to construct
++//! cross-contract calls into the deployed Astroport-Juno set should depend on
++//! this crate, **not** on the GPL-3.0 `astroport` crate — that keeps their
++//! own licensing clean.
++//!
++//! The types here are intentionally re-written (not re-exported) from
++//! `packages/astroport`. Wire formats must remain byte-identical to the
++//! authoritative types in the GPL crate: a CI drift gate
++//! (`scripts/check_juno_types_drift.sh`) fails if the generated JSON schemas
++//! disagree.
++//!
++//! See `planning/02-juno-patches.md` for the rationale and maintenance
++//! contract.
++
++pub mod asset;
++pub mod factory;
++pub mod pair;
++pub mod router;
+diff --git a/packages/astroport_juno_types/src/pair.rs b/packages/astroport_juno_types/src/pair.rs
+new file mode 100644
+index 00000000..0b43aceb
+--- /dev/null
++++ b/packages/astroport_juno_types/src/pair.rs
+@@ -0,0 +1,122 @@
++//! Wire-type mirror of `astroport::pair` subset needed by downstream
++//! consumers. Includes the Juno-specific `pool_unpause_at` MEV-protection
++//! field on `XYKPoolParams`. See planning/02-juno-patches.md.
++
++use crate::asset::{Asset, AssetInfo};
++use crate::factory::PairType;
++use cosmwasm_schema::{cw_serde, QueryResponses};
++use cosmwasm_std::{Addr, Binary, Decimal, Timestamp, Uint128};
++use cw20::Cw20ReceiveMsg;
++
++/// XYK pool initialization parameters, decoded by the pair contract from
++/// the `InstantiateMsg.init_params: Option<Binary>` field.
++#[cw_serde]
++pub struct XYKPoolParams {
++    /// Snapshot LP-side asset balances per block. Cannot be disabled
++    /// after instantiation if enabled.
++    pub track_asset_balances: Option<bool>,
++    /// MEV-protection pause window. While `block.time < pool_unpause_at`,
++    /// swaps revert with `PoolPaused`. LP entry points remain callable
++    /// during the pause. None ⇒ no pause enforced.
++    #[serde(default)]
++    pub pool_unpause_at: Option<Timestamp>,
++}
++
++/// Optional fee-share configuration on a pair.
++#[cw_serde]
++pub struct FeeShareConfig {
++    pub bps: u16,
++    pub recipient: Addr,
++}
++
++/// Pair instantiate parameters. Constructed indirectly through the
++/// factory's `CreatePair` — never instantiated by downstream contracts.
++#[cw_serde]
++pub struct InstantiateMsg {
++    pub asset_infos: Vec<AssetInfo>,
++    pub token_code_id: u64,
++    pub factory_addr: String,
++    pub init_params: Option<Binary>,
++    pub pair_type: PairType,
++}
++
++/// The pair execute message surface downstream consumers may need to
++/// drive. Admin-side mutations are not mirrored.
++#[cw_serde]
++pub enum ExecuteMsg {
++    Receive(Cw20ReceiveMsg),
++    ProvideLiquidity {
++        assets: Vec<Asset>,
++        slippage_tolerance: Option<Decimal>,
++        auto_stake: Option<bool>,
++        receiver: Option<String>,
++        min_lp_to_receive: Option<Uint128>,
++    },
++    WithdrawLiquidity {
++        assets: Vec<Asset>,
++        min_assets_to_receive: Option<Vec<Asset>>,
++    },
++    Swap {
++        offer_asset: Asset,
++        ask_asset_info: Option<AssetInfo>,
++        belief_price: Option<Decimal>,
++        max_spread: Option<Decimal>,
++        to: Option<String>,
++    },
++}
++
++/// The cw20 receive-hook message — used when swapping a cw20 token in.
++#[cw_serde]
++pub enum Cw20HookMsg {
++    Swap {
++        ask_asset_info: Option<AssetInfo>,
++        belief_price: Option<Decimal>,
++        max_spread: Option<Decimal>,
++        to: Option<String>,
++    },
++    WithdrawLiquidity {
++        assets: Vec<Asset>,
++        min_assets_to_receive: Option<Vec<Asset>>,
++    },
++}
++
++/// Pair query surface. The simulation-side queries are what the UI and
++/// router consume most heavily.
++#[cw_serde]
++#[derive(QueryResponses)]
++pub enum QueryMsg {
++    #[returns(crate::asset::PairInfo)]
++    Pair {},
++    #[returns(PoolResponse)]
++    Pool {},
++    #[returns(SimulationResponse)]
++    Simulation {
++        offer_asset: Asset,
++        ask_asset_info: Option<AssetInfo>,
++    },
++    #[returns(ReverseSimulationResponse)]
++    ReverseSimulation {
++        offer_asset_info: Option<AssetInfo>,
++        ask_asset: Asset,
++    },
++}
++
++#[cw_serde]
++pub struct PoolResponse {
++    pub assets: Vec<Asset>,
++    pub total_share: Uint128,
++}
++
++#[cw_serde]
++pub struct SimulationResponse {
++    pub return_amount: Uint128,
++    pub spread_amount: Uint128,
++    pub commission_amount: Uint128,
++}
++
++#[cw_serde]
++pub struct ReverseSimulationResponse {
++    pub offer_amount: Uint128,
++    pub spread_amount: Uint128,
++    pub commission_amount: Uint128,
++}
+diff --git a/packages/astroport_juno_types/src/router.rs b/packages/astroport_juno_types/src/router.rs
+new file mode 100644
+index 00000000..6b292703
+--- /dev/null
++++ b/packages/astroport_juno_types/src/router.rs
+@@ -0,0 +1,85 @@
++//! Wire-type mirror of `astroport::router` subset needed by downstream
++//! consumers to construct multi-hop swap operations.
++
++use crate::asset::AssetInfo;
++use cosmwasm_schema::{cw_serde, QueryResponses};
++use cosmwasm_std::{Decimal, Uint128};
++use cw20::Cw20ReceiveMsg;
++
++pub const MAX_SWAP_OPERATIONS: usize = 50;
++
++#[cw_serde]
++pub struct InstantiateMsg {
++    pub astroport_factory: String,
++}
++
++#[cw_serde]
++pub enum SwapOperation {
++    NativeSwap {
++        offer_denom: String,
++        ask_denom: String,
++    },
++    AstroSwap {
++        offer_asset_info: AssetInfo,
++        ask_asset_info: AssetInfo,
++    },
++}
++
++#[cw_serde]
++pub enum ExecuteMsg {
++    Receive(Cw20ReceiveMsg),
++    ExecuteSwapOperations {
++        operations: Vec<SwapOperation>,
++        minimum_receive: Option<Uint128>,
++        to: Option<String>,
++        max_spread: Option<Decimal>,
++    },
++    ExecuteSwapOperation {
++        operation: SwapOperation,
++        to: Option<String>,
++        max_spread: Option<Decimal>,
++        single: bool,
++    },
++}
++
++#[cw_serde]
++pub struct SwapResponseData {
++    pub return_amount: Uint128,
++}
++
++#[cw_serde]
++pub enum Cw20HookMsg {
++    ExecuteSwapOperations {
++        operations: Vec<SwapOperation>,
++        minimum_receive: Option<Uint128>,
++        to: Option<String>,
++        max_spread: Option<Decimal>,
++    },
++}
++
++#[cw_serde]
++#[derive(QueryResponses)]
++pub enum QueryMsg {
++    #[returns(ConfigResponse)]
++    Config {},
++    #[returns(SimulateSwapOperationsResponse)]
++    SimulateSwapOperations {
++        offer_amount: Uint128,
++        operations: Vec<SwapOperation>,
++    },
++    #[returns(Uint128)]
++    ReverseSimulateSwapOperations {
++        ask_amount: Uint128,
++        operations: Vec<SwapOperation>,
++    },
++}
++
++#[cw_serde]
++pub struct ConfigResponse {
++    pub astroport_factory: String,
++}
++
++#[cw_serde]
++pub struct SimulateSwapOperationsResponse {
++    pub amount: Uint128,
++}
+diff --git a/packages/astroport_juno_types/tests/wire_drift.rs b/packages/astroport_juno_types/tests/wire_drift.rs
+new file mode 100644
+index 00000000..2736abee
+--- /dev/null
++++ b/packages/astroport_juno_types/tests/wire_drift.rs
+@@ -0,0 +1,196 @@
++//! Wire-format drift guard against `packages/astroport`.
++//!
++//! For each shared type, construct a representative instance using the
++//! MIT shim's types, serialize it to JSON, deserialize as the
++//! authoritative GPL `astroport` type, and assert equality. Any silent
++//! divergence in field names, enum tagging, or serde defaults will fail
++//! one of these assertions.
++//!
++//! The dev-dep on `astroport` is scoped to this test target only — the
++//! shipped library has no GPL linkage.
++
++use astroport_juno_types as juno;
++use cosmwasm_std::{to_json_string, Addr, Binary, Decimal, Timestamp, Uint128};
++
++fn roundtrip<S: serde::Serialize, D: serde::de::DeserializeOwned + PartialEq + std::fmt::Debug>(
++    shim_value: &S,
++) -> D {
++    let json = to_json_string(shim_value).expect("shim type serializes");
++    serde_json::from_str::<D>(&json)
++        .unwrap_or_else(|e| panic!("upstream type failed to deserialize shim JSON: {e}\n{json}"))
++}
++
++#[test]
++fn asset_info_roundtrip() {
++    let shim_native = juno::asset::AssetInfo::NativeToken {
++        denom: "ujuno".to_string(),
++    };
++    let upstream_native: astroport::asset::AssetInfo = roundtrip(&shim_native);
++    assert!(matches!(
++        upstream_native,
++        astroport::asset::AssetInfo::NativeToken { ref denom } if denom == "ujuno"
++    ));
++
++    let shim_token = juno::asset::AssetInfo::Token {
++        contract_addr: Addr::unchecked("contract0000"),
++    };
++    let upstream_token: astroport::asset::AssetInfo = roundtrip(&shim_token);
++    assert!(matches!(
++        upstream_token,
++        astroport::asset::AssetInfo::Token { ref contract_addr } if contract_addr.as_str() == "contract0000"
++    ));
++}
++
++#[test]
++fn asset_roundtrip() {
++    let shim = juno::asset::Asset {
++        info: juno::asset::AssetInfo::NativeToken {
++            denom: "ujuno".to_string(),
++        },
++        amount: Uint128::new(1_000_000),
++    };
++    let upstream: astroport::asset::Asset = roundtrip(&shim);
++    assert_eq!(upstream.amount, Uint128::new(1_000_000));
++}
++
++#[test]
++fn factory_pair_type_roundtrip() {
++    for shim in [
++        juno::factory::PairType::Xyk {},
++        juno::factory::PairType::Stable {},
++        juno::factory::PairType::Custom("concentrated".to_string()),
++    ] {
++        let upstream: astroport::factory::PairType = roundtrip(&shim);
++        assert_eq!(upstream.to_string(), shim.to_string());
++    }
++}
++
++#[test]
++fn factory_pair_config_roundtrip() {
++    let shim = juno::factory::PairConfig {
++        code_id: 42,
++        pair_type: juno::factory::PairType::Xyk {},
++        total_fee_bps: 30,
++        maker_fee_bps: 0,
++        is_disabled: false,
++        is_generator_disabled: true,
++        permissioned: false,
++        whitelist: None,
++    };
++    let upstream: astroport::factory::PairConfig = roundtrip(&shim);
++    assert_eq!(upstream.code_id, 42);
++    assert_eq!(upstream.total_fee_bps, 30);
++}
++
++#[test]
++fn factory_create_pair_roundtrip() {
++    // The single most load-bearing wire path: a downstream contract
++    // (cw-abc graduation) constructs a CreatePair message via the shim
++    // and the deployed factory must deserialize it correctly.
++    let shim = juno::factory::ExecuteMsg::CreatePair {
++        pair_type: juno::factory::PairType::Xyk {},
++        asset_infos: vec![
++            juno::asset::AssetInfo::NativeToken {
++                denom: "ujuno".to_string(),
++            },
++            juno::asset::AssetInfo::NativeToken {
++                denom: "ibc/USDC".to_string(),
++            },
++        ],
++        init_params: Some(Binary::from(b"opaque".to_vec())),
++    };
++    let upstream: astroport::factory::ExecuteMsg = roundtrip(&shim);
++    match upstream {
++        astroport::factory::ExecuteMsg::CreatePair {
++            pair_type,
++            asset_infos,
++            init_params,
++        } => {
++            assert!(matches!(pair_type, astroport::factory::PairType::Xyk {}));
++            assert_eq!(asset_infos.len(), 2);
++            assert_eq!(init_params.unwrap().0, b"opaque".to_vec());
++        }
++        other => panic!("expected CreatePair, got {:?}", other),
++    }
++}
++
++#[test]
++fn pair_xyk_pool_params_roundtrip_with_unpause() {
++    let unpause_at = Timestamp::from_seconds(1_750_000_000);
++    let shim = juno::pair::XYKPoolParams {
++        track_asset_balances: Some(true),
++        pool_unpause_at: Some(unpause_at),
++    };
++    let upstream: astroport::pair::XYKPoolParams = roundtrip(&shim);
++    assert_eq!(upstream.track_asset_balances, Some(true));
++    assert_eq!(upstream.pool_unpause_at, Some(unpause_at));
++}
++
++#[test]
++fn pair_xyk_pool_params_omitted_unpause_field() {
++    // A v0.1.0 caller (or one that simply omits the new field) must
++    // still deserialize as None — backward-wire-compat.
++    let shim = juno::pair::XYKPoolParams {
++        track_asset_balances: Some(false),
++        pool_unpause_at: None,
++    };
++    let upstream: astroport::pair::XYKPoolParams = roundtrip(&shim);
++    assert_eq!(upstream.pool_unpause_at, None);
++}
++
++#[test]
++fn pair_swap_execute_roundtrip() {
++    let shim = juno::pair::ExecuteMsg::Swap {
++        offer_asset: juno::asset::Asset {
++            info: juno::asset::AssetInfo::NativeToken {
++                denom: "ujuno".to_string(),
++            },
++            amount: Uint128::new(123),
++        },
++        ask_asset_info: None,
++        belief_price: Some(Decimal::percent(50)),
++        max_spread: None,
++        to: None,
++    };
++    let upstream: astroport::pair::ExecuteMsg = roundtrip(&shim);
++    match upstream {
++        astroport::pair::ExecuteMsg::Swap {
++            offer_asset,
++            belief_price,
++            ..
++        } => {
++            assert_eq!(offer_asset.amount, Uint128::new(123));
++            assert_eq!(belief_price, Some(Decimal::percent(50)));
++        }
++        other => panic!("expected Swap, got {:?}", other),
++    }
++}
++
++#[test]
++fn router_swap_operations_roundtrip() {
++    let shim = juno::router::ExecuteMsg::ExecuteSwapOperations {
++        operations: vec![juno::router::SwapOperation::AstroSwap {
++            offer_asset_info: juno::asset::AssetInfo::NativeToken {
++                denom: "ujuno".to_string(),
++            },
++            ask_asset_info: juno::asset::AssetInfo::NativeToken {
++                denom: "ibc/USDC".to_string(),
++            },
++        }],
++        minimum_receive: Some(Uint128::new(900)),
++        to: Some("recipient".to_string()),
++        max_spread: None,
++    };
++    let upstream: astroport::router::ExecuteMsg = roundtrip(&shim);
++    match upstream {
++        astroport::router::ExecuteMsg::ExecuteSwapOperations {
++            operations,
++            minimum_receive,
++            ..
++        } => {
++            assert_eq!(operations.len(), 1);
++            assert_eq!(minimum_receive, Some(Uint128::new(900)));
++        }
++        other => panic!("expected ExecuteSwapOperations, got {:?}", other),
++    }
++}
+diff --git a/planning/02-juno-patches.md b/planning/02-juno-patches.md
+new file mode 100644
+index 00000000..99e2b66f
+--- /dev/null
++++ b/planning/02-juno-patches.md
+@@ -0,0 +1,277 @@
++# 02 — Juno-specific functional patches (P2)
++
++The total functional patch surface in v0.1.1-juno-rc1, taken against the
++v0.1.0-juno-rc0 strip-only baseline. Audit diff B.
++
++## Summary
++
++| Patch | LoC (est.) | Audit weight |
++|---|---|---|
++| `pool_unpause_at` field + gate in `pair` | ~25 + 150 tests | **High** — new financial-risk surface |
++| `astroport-juno-types` MIT shim crate | ~250 + 40 schema + 30 drift-check | Low — wire-type mirror with CI drift gate |
++| Factory pair-config defaults | 0 LoC (config-time only) | None — documented in runbook |
++
++## Patch 1: `pool_unpause_at` MEV gate on pair swaps
++
++### Why
++
++The cw-abc graduation flow (memo: `memory/abc-graduation-architecture-astroport.md`)
++seeds a new pair atomically as a bonding curve crosses its reserve
++threshold. Without a pause window, snipers can frontrun the
++graduation block and extract value from the freshly-seeded pool
++before retail discovery. The patch lets the seeder request a short
++swap-blackout window during which liquidity can be provided but
++swaps revert.
++
++For non-graduating pools (the v1 default), `pool_unpause_at: None`
++is the wire-default and the gate is bypassed. No behavioral change
++vs upstream Astroport for normal pair creation.
++
++### Gate site discovery
++
++Upstream Astroport v5.13.1 routes both swap entry points through a
++single `swap()` function:
++
++| Entry point | File:line | Path |
++|---|---|---|
++| Native asset via `ExecuteMsg::Swap` | `contracts/pair/src/contract.rs:249-273` | calls `swap()` directly |
++| cw20 token via `ExecuteMsg::Receive` → `Cw20HookMsg::Swap` | `contracts/pair/src/contract.rs:286-333` | dispatches into `swap()` after asset-info translation |
++
++The gate therefore lives in **one** place: the top of `swap()`. This
++is a smaller surface than the original plan envisioned (which assumed
++two parallel gates).
++
++### Wire-protocol entry
++
++The pair's `InstantiateMsg.init_params: Option<Binary>` is already
++the canonical configuration channel; upstream decodes it as
++`XYKPoolParams` and extracts `track_asset_balances`. We extend the
++same struct with `pool_unpause_at: Option<Timestamp>`. This means:
++
++- **No `InstantiateMsg` JSON shape change** — only the inner
++  `XYKPoolParams` gets an optional field.
++- **Backward-compatible deserialization** — a v0.1.0 caller that
++  omits the new field gets `None`, exactly what existing pools
++  expect.
++- **No factory edits** — factory already passes `init_params`
++  through verbatim to pair instantiate.
++
++### Patch sites (file-by-file)
++
++1. **`packages/astroport/src/pair.rs`** (around line 227-234):
++
++   ```rust
++   #[cw_serde]
++   pub struct XYKPoolParams {
++       pub track_asset_balances: Option<bool>,
++       /// Optional timestamp; swaps revert with `PoolPaused` until
++       /// this time. `None` ⇒ no pause. Set by the graduation flow
++       /// (see memory/abc-graduation-architecture-astroport.md).
++       /// LP provide/withdraw remain callable during the pause.
++       pub pool_unpause_at: Option<Timestamp>,
++   }
++   ```
++
++2. **`contracts/pair/src/state.rs`** — extend `Config` after the
++   `tracker_addr` field:
++
++   ```rust
++   /// Optional pause timestamp; if set, swaps revert with
++   /// `PoolPaused` until block.time >= pool_unpause_at.
++   pub pool_unpause_at: Option<Timestamp>,
++   ```
++
++   Add `cosmwasm_std::Timestamp` to the imports.
++
++3. **`contracts/pair/src/error.rs`** — new variant:
++
++   ```rust
++   #[error("Pool is paused until {unpause_at}")]
++   PoolPaused { unpause_at: Timestamp },
++   ```
++
++   Add `Timestamp` to the `cosmwasm_std` import line.
++
++4. **`contracts/pair/src/contract.rs`**:
++
++   - **Imports (top of file):** add `Timestamp` to the `cosmwasm_std::{...}`
++     line.
++   - **`instantiate()` (around line 70-99):** when decoding
++     `XYKPoolParams`, lift the new `pool_unpause_at` field
++     alongside `track_asset_balances` and persist it on `Config`.
++   - **`swap()` (around line 616-628):** gate, immediately after
++     `let mut config = CONFIG.load(deps.storage)?;`:
++
++     ```rust
++     if let Some(unpause_at) = config.pool_unpause_at {
++         if env.block.time < unpause_at {
++             return Err(ContractError::PoolPaused { unpause_at });
++         }
++     }
++     ```
++
++   No edits to `receive_cw20()` (it dispatches through `swap()`),
++   `provide_liquidity()`, or `withdraw_liquidity()`. The LP entry
++   points stay callable during the pause window so liquidity can be
++   seeded before unpause.
++
++### Test plan
++
++Three new integration tests at the end of
++`contracts/pair/tests/integration.rs`:
++
++1. **`swap_during_pause_rejects`** — instantiate the pair with
++   `init_params: XYKPoolParams { pool_unpause_at: Some(now + 60), .. }`.
++   `provide_liquidity` must succeed (LP entry points remain open).
++   `execute(ExecuteMsg::Swap { .. })` must fail with
++   `ContractError::PoolPaused { unpause_at: <same timestamp> }`.
++
++2. **`provide_and_withdraw_during_pause_succeeds`** — same paused
++   instantiation. Two LPs `ProvideLiquidity`; one `WithdrawLiquidity`.
++   Both succeed without touching `swap()`. Confirms LP-side
++   surface is unaffected.
++
++3. **`unpause_elapses_then_swap_works`** — same paused instantiation.
++   `provide_liquidity`. `app.update_block(|b| b.time = b.time.plus_seconds(61))`.
++   Swap must succeed and the price-cumulative math must update as
++   on a non-paused pool.
++
++Template: the existing native-asset Swap call at
++`contracts/pair/tests/integration.rs:1121-1140` shows the funds + msg
++shape; mirror it.
++
++### Why this patch is small enough to land cleanly
++
++- **One state field** + **one error variant** + **one gate site** =
++  three diff points.
++- No new dependencies; uses only `cosmwasm_std::Timestamp` which is
++  already in scope across pair.
++- Backward-compatible wire format means no factory edits and no
++  migration concerns.
++- All non-Swap entry points untouched.
++
++The graduation flow that consumes this gate (cw-abc) is out of scope
++for this fork; it lives in `dao-contracts`. This contract change
++exposes the primitive; the consumer wires it in via
++`to_json_binary(&XYKPoolParams { pool_unpause_at: Some(ts), .. })`.
++
++## Patch 2: `astroport-juno-types` MIT shim crate
++
++### Why
++
++`packages/astroport` is GPL-3.0-only. Any downstream CosmWasm contract
++that imports `astroport::factory::InstantiateMsg` (etc.) to construct
++a `CreatePair` cross-contract call inherits GPL through linkage.
++
++The most concrete downstream consumer is the cw-abc graduation
++extension in `dao-contracts` — that crate is Apache-2.0 / BSD-3 and
++should stay that way. Exposing the wire types under an MIT-licensed
++shim crate lets downstream import only the message shapes they need
++without touching the GPL pair/factory/router implementation crates.
++
++### Design
++
++- New workspace member: `packages/astroport_juno_types/`.
++- License: MIT (sibling `LICENSE-MIT` file; `Cargo.toml`
++  `license = "MIT"`).
++- Dependencies: `cosmwasm-schema`, `cosmwasm-std`, `cw20`. **No
++  path-dep on `astroport`** — that would re-pull GPL transitively.
++- Types mirrored (re-written, not re-exported, so license cleanly
++  separates):
++  - `astroport::factory::{InstantiateMsg, ExecuteMsg::CreatePair,
++    PairConfig, PairType, TrackerConfig}`
++  - `astroport::pair::{InstantiateMsg, ExecuteMsg, QueryMsg,
++    XYKPoolParams, FeeShareConfig}` (including the v0.1.1
++    `pool_unpause_at` field on `XYKPoolParams`)
++  - `astroport::router::{ExecuteMsg, QueryMsg, SwapOperation,
++    SimulateSwapOperationsResponse, SwapResponseData}`
++  - `astroport::asset::{Asset, AssetInfo, PairInfo}`
++
++### Drift defense
++
++Two crates owning the same wire format is a maintenance liability.
++The mitigation is a CI gate that proves they don't diverge silently:
++
++- `packages/astroport_juno_types/examples/schema.rs` emits JSON
++  schemas for each mirrored message type.
++- `scripts/check_juno_types_drift.sh` runs both schema-gen entry
++  points (the shim's example and `packages/astroport`'s example)
++  and diffs the equivalent JSON files. Any difference fails the
++  script.
++- New step in `.github/workflows/tests_and_checks.yml` runs the
++  drift-check after the existing `cargo test --workspace`. Drift
++  fails CI.
++
++### What lives where
++
++| Type | Authoritative impl | Wire mirror |
++|---|---|---|
++| `factory::ExecuteMsg::CreatePair` | `packages/astroport/src/factory.rs` (GPL) | `astroport_juno_types::factory` (MIT) |
++| `pair::XYKPoolParams` | `packages/astroport/src/pair.rs` (GPL) | `astroport_juno_types::pair` (MIT) |
++| Pair *behavior* (the swap math) | `contracts/pair/src/contract.rs` (GPL) | **Not mirrored.** Downstream contracts that need pair behavior depend on the contract via Stargate/wasm calls, not via Rust linkage. |
++
++Downstream consumption pattern (in e.g. `dao-contracts`):
++
++```rust
++use astroport_juno_types::factory::{ExecuteMsg, PairType};
++use astroport_juno_types::pair::XYKPoolParams;
++
++let msg = ExecuteMsg::CreatePair {
++    pair_type: PairType::Xyk {},
++    asset_infos: vec![reserve, supply],
++    init_params: Some(to_json_binary(&XYKPoolParams {
++        track_asset_balances: None,
++        pool_unpause_at: Some(unpause_ts),
++    })?),
++};
++```
++
++The downstream contract never imports `astroport::*` and stays
++license-clean.
++
++## Patch 3: Factory pair-config defaults (no-code, documentation)
++
++For `v1` deployment, the deployer constructs the initial
++`PairConfig` with:
++
++```
++total_fee_bps: 30,         // 0.3% — industry default
++maker_fee_bps: 0,          // no DEX token in v1; LPs keep full commission
++is_disabled: false,
++is_generator_disabled: true, // no incentives in v1
++permissioned: false,       // v1 is permissionless
++whitelist: None,
++```
++
++This is operational configuration, not source code. Captured here
++and in `planning/06-deploy-runbook.md`.
++
++## Out of scope for v0.1.1
++
++- Factory wire-protocol changes — none required; existing
++  `init_params: Option<Binary>` carries `pool_unpause_at` through
++  to pair instantiate untouched.
++- LP-side pause — by design, providing and withdrawing remain
++  open during the pause window so the seeder can fund the pool.
++- `pool_unpause_at` mutation post-instantiate — there is no
++  `UpdateConfig` path for it. Once a pair is created with a
++  pause window, the window cannot be extended or shortened. This
++  is intentional for v0.1.1; a future v0.2 could expose an
++  admin-gated mutation if a use case arises.
++- Other pair types (stable, PCL) — they're deferred from the v1
++  workspace; the patch only touches XYK.
++
++## How this maps to the audit
++
++Diff A = `v5.13.1..v0.1.0-juno-rc0` (strip-only; subtractive review).
++Diff B = `v0.1.0-juno-rc0..v0.1.1-juno-rc1` (this patch set; deep
++review). Diff B's reviewable surface:
++
++- ~25 LoC of contract change in `contracts/pair/src/`
++- ~150 LoC of new tests
++- ~250 LoC of MIT-shim types (mechanical mirror; review for
++  exact-wire-match)
++- ~70 LoC of CI drift-check + schema example
++
++The MEV gate in `swap()` is the only line that affects fund flow
++behavior. Everything else is data/wire-shape.
