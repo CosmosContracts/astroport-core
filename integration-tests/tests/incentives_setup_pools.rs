@@ -11,7 +11,8 @@ use cosmwasm_std::{coin, Addr, Timestamp, Uint128};
 use astroport::asset::{Asset, AssetInfo, PairInfo};
 use astroport::factory::{ExecuteMsg as FactoryExecuteMsg, PairType, QueryMsg as FactoryQueryMsg};
 use astroport::incentives::{
-    ExecuteMsg as IncentivesExecuteMsg, QueryMsg as IncentivesQueryMsg, EPOCHS_START,
+    ExecuteMsg as IncentivesExecuteMsg, GeneratorControllerUpdate, QueryMsg as IncentivesQueryMsg,
+    EPOCHS_START,
 };
 use astroport::pair::ExecuteMsg as PairExecuteMsg;
 use astroport_test::cw_multi_test::Executor;
@@ -200,7 +201,7 @@ fn incentives_generator_controller_can_call_setup_pools() {
         handles.deployer.clone(),
         inc.incentives.clone(),
         &IncentivesExecuteMsg::UpdateConfig {
-            generator_controller: Some(controller.to_string()),
+            generator_controller: GeneratorControllerUpdate::Set(controller.to_string()),
             guardian: None,
             incentivization_fee_info: None,
             token_transfer_gas_limit: None,

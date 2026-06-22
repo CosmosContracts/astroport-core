@@ -92,6 +92,10 @@ pub enum QueryMsg {
     },
     #[returns(FeeInfoResponse)]
     FeeInfo { pair_type: PairType },
+    #[returns(Vec<PairType>)]
+    BlacklistedPairTypes {},
+    #[returns(TrackerConfig)]
+    TrackerConfig {},
 }
 
 #[cw_serde]

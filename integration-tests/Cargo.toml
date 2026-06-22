@@ -27,3 +27,12 @@ anyhow = "1.0"
 cw2 = "1.1"
 cw20-base = "1.1"
 cw1-whitelist = { version = "1.1", features = ["library"] }
+
+[dev-dependencies]
+# Used by `tests/incentives_stuck_funds_recovered.rs` to back the
+# controllable-cw20 mock contract's storage. The mock has a togglable
+# `Transfer` failure switch so the audit-regression test can force a
+# real submessage failure and exercise the orphaned-rewards recovery
+# path. Pinned to the same major as the workspace dep so the storage
+# layout matches.
+cw-storage-plus = { workspace = true }

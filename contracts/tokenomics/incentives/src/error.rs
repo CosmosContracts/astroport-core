@@ -70,6 +70,21 @@ pub enum ContractError {
     #[error("Failed to migrate contract")]
     MigrationError {},
 
+    #[error("Unsupported migration from {from_contract} {from_version} to {to_contract} {to_version}: upstream Astroport state shape is incompatible with the Juno fork (Config.astro_token → reward_token, vesting_contract removed). Re-instantiate instead of migrating.")]
+    UnsupportedMigrationVersion {
+        from_contract: String,
+        from_version: String,
+        to_contract: String,
+        to_version: String,
+    },
+
     #[error("Sent insufficient reward {reward} for pool {lp_token}")]
     InsuffiicientRewardToken { reward: String, lp_token: String },
+
+    /// Internal invariant: a `PoolInfo` reported `is_active_pool() == true` but the
+    /// pool was missing from the `ACTIVE_POOLS` registry. Surfacing the breach as a
+    /// typed error (instead of unwrap-panicking) lets monitors alert without halting
+    /// the transaction stack in an unrecoverable state.
+    #[error("Active pool invariant broken for lp_token {lp_token}: pool reports active but is missing from ACTIVE_POOLS registry")]
+    ActivePoolInvariantBroken { lp_token: String },
 }

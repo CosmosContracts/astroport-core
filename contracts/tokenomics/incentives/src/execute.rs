@@ -14,7 +14,9 @@ use astroport::asset::{
 use astroport::common::{claim_ownership, drop_ownership_proposal, propose_new_owner};
 use astroport::factory;
 use astroport::factory::PairType;
-use astroport::incentives::{ExecuteMsg, IncentivizationFeeInfo, TOKEN_TRANSFER_GAS_LIMIT};
+use astroport::incentives::{
+    ExecuteMsg, GeneratorControllerUpdate, IncentivizationFeeInfo, TOKEN_TRANSFER_GAS_LIMIT,
+};
 
 use crate::error::ContractError;
 use crate::state::{
@@ -355,7 +357,7 @@ fn set_tokens_per_second(
 fn update_config(
     deps: DepsMut,
     info: MessageInfo,
-    generator_controller: Option<String>,
+    generator_controller: GeneratorControllerUpdate,
     guardian: Option<String>,
     incentivization_fee_info: Option<IncentivizationFeeInfo>,
     token_transfer_gas_limit: Option<u64>,
@@ -374,9 +376,20 @@ fn update_config(
     // requires migration), and rewards are paid directly from this
     // contract's own bank balance (the DAO refunds via BankMsg::Send).
 
-    if let Some(generator_controller) = generator_controller {
-        config.generator_controller = Some(deps.api.addr_validate(&generator_controller)?);
-        attrs.push(attr("new_generator_controller", generator_controller));
+    // Tristate update for `generator_controller`: explicit `Unset` is
+    // required so the DAO can revoke a compromised gauge adapter without
+    // rotating ownership. See audit finding "generator_controller unset
+    // path" (rc2).
+    match generator_controller {
+        GeneratorControllerUpdate::Set(addr) => {
+            config.generator_controller = Some(deps.api.addr_validate(&addr)?);
+            attrs.push(attr("new_generator_controller", addr));
+        }
+        GeneratorControllerUpdate::Unset => {
+            config.generator_controller = None;
+            attrs.push(attr("new_generator_controller", "unset"));
+        }
+        GeneratorControllerUpdate::NoChange => {}
     }
 
     if let Some(guardian) = guardian {

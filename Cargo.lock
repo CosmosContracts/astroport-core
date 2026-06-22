@@ -175,6 +175,7 @@ dependencies = [
  "astroport-whitelist",
  "cosmwasm-schema",
  "cosmwasm-std",
+ "cw-storage-plus 1.2.0",
  "cw1-whitelist",
  "cw2 1.1.2",
  "cw20 1.1.2",

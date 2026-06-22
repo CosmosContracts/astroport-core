@@ -9,8 +9,8 @@
 //!     fields; not mirrored anyway (admin-only).
 //!   - `astro_token` / `astro_per_second` were renamed to
 //!     `reward_token` / `reward_per_second` in `Config` on the Juno side;
-//!     the shim mirrors the new names. `Config` itself is admin-only and
-//!     not mirrored, but the names match should the shim grow to include it.
+//!     the shim mirrors the new names so UIs can introspect the live
+//!     `Config` through the shim without dragging in the full GPL crate.
 //!
 //! Downstream call sites:
 //!   - DAO DAO gauge adapter (in dao-contracts/contracts/gauges/) dispatches
@@ -19,13 +19,14 @@
 //!     reward schedules (native or cw20).
 //!   - Farm wrapper contracts (or LP-side automation) dispatch `Deposit`,
 //!     `Withdraw`, `ClaimRewards`.
-//!   - UIs query `Deposit`, `PendingRewards`, `PoolInfo`, `ActivePools`.
+//!   - UIs query `Config`, `Deposit`, `PendingRewards`, `PoolInfo`,
+//!     `ActivePools`.
 //!
 //! See planning/11-incentives-and-gauges.md.
 
 use crate::asset::{Asset, AssetInfo};
 use cosmwasm_schema::{cw_serde, QueryResponses};
-use cosmwasm_std::{Decimal256, Uint128};
+use cosmwasm_std::{Addr, Coin, Decimal256, Uint128};
 
 /// External incentive schedule input. Schedules align to weekly epochs
 /// (Mondays UTC); `duration_periods` is the number of full weeks the
@@ -105,6 +106,12 @@ pub enum ExecuteMsg {
 #[cw_serde]
 #[derive(QueryResponses)]
 pub enum QueryMsg {
+    /// Returns the main contract parameters. Mirrored so UIs can read the
+    /// renamed `reward_token` / `reward_per_second` fields (was
+    /// `astro_token` / `astro_per_second` upstream) without depending on
+    /// the GPL `astroport` crate.
+    #[returns(Config)]
+    Config {},
     /// Returns the LP token amount deposited in a specific generator by a
     /// specific user. Returns 0 if no position exists.
     #[returns(Uint128)]
@@ -161,4 +168,46 @@ pub struct PoolInfoResponse {
     pub rewards: Vec<RewardInfo>,
     /// Last time reward indexes were updated.
     pub last_update_ts: u64,
+}
+
+/// Per-pool fee charged when registering a NEW external reward token on a
+/// pool. Mirrored from the GPL crate; field shape is the same.
+#[cw_serde]
+pub struct IncentivizationFeeInfo {
+    /// Fee receiver (contract or wallet).
+    pub fee_receiver: Addr,
+    /// Native-only fee (no cw20).
+    pub fee: Coin,
+}
+
+/// Returned by `QueryMsg::Config`. Mirrors the GPL `astroport::incentives::Config`
+/// with the Astroport-Juno field renames (`astro_token` → `reward_token`,
+/// `astro_per_second` → `reward_per_second`); see module docstring.
+#[cw_serde]
+pub struct Config {
+    /// Address allowed to change contract parameters.
+    pub owner: Addr,
+    /// The factory address.
+    pub factory: Addr,
+    /// Contract address which can set active generators and their alloc
+    /// points (in addition to `owner`). On Astroport-Juno this is the
+    /// DAO DAO gauge adapter.
+    pub generator_controller: Option<Addr>,
+    /// [`AssetInfo`] of the internal (DAO-funded) reward token. Renamed
+    /// from upstream's `astro_token`; for Astroport-Juno this is typically
+    /// `AssetInfo::native("ujuno")`. Immutable post-instantiate.
+    pub reward_token: AssetInfo,
+    /// Total amount of the internal reward token to distribute per second.
+    /// Renamed from upstream's `astro_per_second`.
+    pub reward_per_second: Uint128,
+    /// Total allocation points across all active generators.
+    pub total_alloc_points: Uint128,
+    /// Guardian address — can add/remove tokens from the blocked list.
+    pub guardian: Option<Addr>,
+    /// Native fee + receiver for registering new external rewards on a
+    /// pool. `None` disables the fee.
+    pub incentivization_fee_info: Option<IncentivizationFeeInfo>,
+    /// Max gas allowed per external-reward token transfer. `None` means
+    /// no limit.
+    pub token_transfer_gas_limit: Option<u64>,
 }

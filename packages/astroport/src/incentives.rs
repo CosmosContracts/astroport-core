@@ -176,10 +176,18 @@ pub enum ExecuteMsg {
     /// rewards are paid directly from the incentives contract's own bank
     /// balance (the DAO refunds via BankMsg::Send).
     UpdateConfig {
-        /// The new generator controller contract address. Only the
-        /// controller (in addition to owner) can call SetupPools; this is
-        /// the binding to the DAO DAO gauge adapter.
-        generator_controller: Option<String>,
+        /// Tristate update for the generator controller contract address.
+        /// `Set(addr)` writes a new controller; `Unset` revokes the
+        /// existing one (clears the binding); `NoChange` (the default,
+        /// also produced when the field is omitted from JSON) leaves the
+        /// controller untouched. The controller — when set — is the only
+        /// address other than the owner allowed to call SetupPools, and
+        /// is the binding to the DAO DAO gauge adapter. An explicit
+        /// `Unset` path is required so the DAO can revoke a compromised
+        /// adapter without rotating ownership. See audit finding
+        /// "generator_controller unset path" (rc2).
+        #[serde(default)]
+        generator_controller: GeneratorControllerUpdate,
         /// The new generator guardian
         guardian: Option<String>,
         /// New incentivization fee info
@@ -288,6 +296,31 @@ pub struct IncentivizationFeeInfo {
     pub fee_receiver: Addr,
     /// To make things easier we avoid CW20 fee tokens
     pub fee: Coin,
+}
+
+/// Tristate update wire for the optional `generator_controller` field on
+/// `UpdateConfig`. The previous `Option<String>` wire could only set or
+/// no-op — it had no path to revoke a controller short of rotating
+/// ownership — so a compromised gauge adapter could not be cleanly
+/// detached. This enum gives the owner an explicit `Unset` path.
+///
+/// JSON shape (cw_serde lowercases variant names):
+///   - `{"set": "<addr>"}`  — write a new controller address
+///   - `"unset"`            — clear the controller (set to `None`)
+///   - `"no_change"`        — leave the controller untouched (also the
+///                            default when the field is omitted)
+#[cw_serde]
+#[derive(Default)]
+pub enum GeneratorControllerUpdate {
+    /// Set the controller to the given address.
+    Set(String),
+    /// Revoke the controller (clear `Config.generator_controller`).
+    Unset,
+    /// Leave the controller untouched. This is the default so that
+    /// omitting the field from a JSON `UpdateConfig` payload behaves
+    /// identically to the pre-rc3 `Option<String>::None` semantics.
+    #[default]
+    NoChange,
 }
 
 #[cw_serde]
